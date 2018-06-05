@@ -1,187 +1,216 @@
-# coding: utf-8
-
 from datetime import datetime, timedelta
-import time
 
 from django import template
-from django.db.models import Q, F
+from django.contrib.contenttypes.models import ContentType
+from django.utils.translation import ugettext_lazy as _
 
-from zds.article.models import Reaction, ArticleRead
-from zds.forum.models import TopicFollowed, never_read as never_read_topic, Post, TopicRead
-from zds.mp.models import PrivateTopic, PrivateTopicRead
-from zds.tutorial.models import Note, TutorialRead
-from zds.utils.models import Alert
-
+from zds.forum.models import Post, is_read as topic_is_read
+from zds.mp.models import PrivateTopic
+from zds.tutorialv2.models.database import Validation
+from zds.notification.models import Notification, TopicAnswerSubscription, ContentReactionAnswerSubscription, \
+    NewTopicSubscription, NewPublicationSubscription
+from zds.tutorialv2.models.database import ContentReaction, PublishableContent
+from zds.utils import get_current_user
+from zds.utils.models import Alert, HatRequest
+from django.conf import settings
+from zds.tutorialv2.models import TYPE_CHOICES_DICT
+from zds.member.models import NewEmailProvider
 
 register = template.Library()
 
 
 @register.filter('is_read')
 def is_read(topic):
-    if never_read_topic(topic):
-        return False
-    else:
-        return True
+    return topic_is_read(topic)
+
+
+@register.filter('is_followed')
+def is_followed(topic):
+    user = get_current_user()
+    return TopicAnswerSubscription.objects.does_exist(user, topic, is_active=True)
+
+
+@register.filter('is_email_followed')
+def is_email_followed(topic):
+    user = get_current_user()
+    return TopicAnswerSubscription.objects.does_exist(user, topic, is_active=True, by_email=True)
+
+
+@register.filter('is_followed_for_new_topic')
+def is_followed_for_new_topic(forum_or_tag):
+    user = get_current_user()
+    return NewTopicSubscription.objects.does_exist(user, forum_or_tag, is_active=True)
+
+
+@register.filter('is_email_followed_for_new_topic')
+def is_email_followed_for_new_topic(forum_or_tag):
+    user = get_current_user()
+    return NewTopicSubscription.objects.does_exist(user, forum_or_tag, is_active=True, by_email=True)
+
+
+@register.filter('is_content_followed')
+def is_content_followed(content):
+    user = get_current_user()
+    return user.is_authenticated() and ContentReactionAnswerSubscription.objects.does_exist(
+        user, content, is_active=True)
+
+
+@register.filter('is_content_email_followed')
+def is_content_email_followed(content):
+    user = get_current_user()
+    return user.is_authenticated() and ContentReactionAnswerSubscription.objects.does_exist(
+        user, content, is_active=True, by_email=True)
+
+
+@register.filter('is_new_publication_followed')
+def is_new_publication_followed(user_to_follow):
+    user = get_current_user()
+    return user.is_authenticated() and NewPublicationSubscription.objects.does_exist(
+        user, user_to_follow, is_active=True)
+
+
+@register.filter('is_new_publication_email_followed')
+def is_new_publication_email_followed(user_to_follow):
+    user = get_current_user()
+    return user.is_authenticated() and NewPublicationSubscription.objects.does_exist(
+        user, user_to_follow, is_active=True, by_email=True)
 
 
 @register.filter('humane_delta')
 def humane_delta(value):
-    # mapping between label day and key
-    const = {1: "Aujourd'hui", 2: "Hier", 3: "Cette semaine", 4: "Ce mois-ci", 5: "Cette année"}
+    """
+    Associating a key to a named period
+
+    :param int value:
+    :return: string
+    """
+    const = {
+        1: _("Aujourd'hui"),
+        2: _('Hier'),
+        3: _('Les 7 derniers jours'),
+        4: _('Les 30 derniers jours'),
+        5: _('Plus ancien')
+    }
 
     return const[value]
 
 
 @register.filter('followed_topics')
 def followed_topics(user):
-    topicsfollowed = TopicFollowed.objects.select_related("topic").filter(user=user)\
-        .order_by('-topic__last_message__pubdate')[:10]
-    # This period is a map for link a moment (Today, yesterday, this week, this month, etc.) with
-    # the number of days for which we can say we're still in the period
-    # for exemple, the tuple (2, 1) means for the period "2" corresponding to "Yesterday" according
-    # to humane_delta, means if your pubdate hasn't exceeded one day, we are always at "Yesterday"
-    # Number is use for index for sort map easily
-    period = ((1, 0), (2, 1), (3, 7), (4, 30), (5, 360))
+    topics_followed = TopicAnswerSubscription.objects.get_objects_followed_by(user)[:10]
+    # periods is a map associating a period (Today, Yesterday, Last n days)
+    # with its corresponding number of days: (humane_delta index, number of days).
+    # (3, 7) thus means that passing 3 to humane_delta would return "This week", for which
+    # we'd like pubdate not to exceed 7 days.
+    periods = ((1, 0), (2, 1), (3, 7), (4, 30), (5, 365))
     topics = {}
-    for tf in topicsfollowed:
-        for p in period:
-            if tf.topic.last_message.pubdate.date() >= (datetime.now() - timedelta(days=int(p[1]),
-                                                                                   hours=0, minutes=0,
-                                                                                   seconds=0)).date():
-                if p[0] in topics:
-                    topics[p[0]].append(tf.topic)
+    for topic in topics_followed:
+        for period in periods:
+            if topic.last_message.pubdate.date() >= \
+                    (datetime.now() - timedelta(days=int(period[1]), hours=0, minutes=0, seconds=0)).date():
+                if period[0] in topics:
+                    topics[period[0]].append(topic)
                 else:
-                    topics[p[0]] = [tf.topic]
+                    topics[period[0]] = [topic]
                 break
     return topics
 
 
-def comp(d1, d2):
-    v1 = int(time.mktime(d1['pubdate'].timetuple()))
-    v2 = int(time.mktime(d2['pubdate'].timetuple()))
-    if v1 > v2:
-        return -1
-    elif v1 < v2:
-        return 1
+@register.filter('get_github_issue_url')
+def get_github_issue_url(topic):
+    if not topic.github_issue:
+        return None
     else:
-        return 0
+        return '{0}/{1}'.format(
+            settings.ZDS_APP['site']['repository']['bugtracker'],
+            topic.github_issue
+        )
 
 
 @register.filter('interventions_topics')
 def interventions_topics(user):
-    topicsfollowed = TopicFollowed.objects.filter(user=user).values("topic").distinct().all()
-
-    topics_never_read = TopicRead.objects\
-        .filter(user=user)\
-        .filter(topic__in=topicsfollowed)\
-        .select_related("topic")\
-        .exclude(post=F('topic__last_message'))
-
-    articlesfollowed = Reaction.objects\
-        .filter(author=user)\
-        .values('article')\
-        .distinct().all()
-
-    articles_never_read = ArticleRead.objects\
-        .filter(user=user)\
-        .filter(article__in=articlesfollowed)\
-        .select_related("article")\
-        .exclude(reaction=F('article__last_reaction'))
-
-    tutorialsfollowed = Note.objects\
-        .filter(author=user)\
-        .values('tutorial')\
-        .distinct().all()
-
-    tutorials_never_read = TutorialRead.objects\
-        .filter(user=user)\
-        .filter(tutorial__in=tutorialsfollowed)\
-        .exclude(note=F('tutorial__last_note'))
-
+    """
+    Gets all notifications related to all notifiable models excluding private topics.
+    """
     posts_unread = []
 
-    for art in articles_never_read:
-        content = art.article.first_unread_reaction()
-        posts_unread.append({'pubdate': content.pubdate,
-                             'author': content.author,
-                             'title': art.article.title,
-                             'url': content.get_absolute_url()})
+    private_topic = ContentType.objects.get_for_model(PrivateTopic)
+    for notification in Notification.objects \
+            .get_unread_notifications_of(user) \
+            .exclude(subscription__content_type=private_topic):
+        posts_unread.append({'pubdate': notification.pubdate,
+                             'author': notification.sender,
+                             'title': notification.title,
+                             'url': notification.url})
 
-    for tuto in tutorials_never_read:
-        content = tuto.tutorial.first_unread_note()
-        posts_unread.append({'pubdate': content.pubdate,
-                             'author': content.author,
-                             'title': tuto.tutorial.title,
-                             'url': content.get_absolute_url()})
-
-    for top in topics_never_read:
-        content = top.topic.first_unread_post()
-        if content is None:
-            content = top.topic.last_message
-        posts_unread.append({'pubdate': content.pubdate,
-                             'author': content.author,
-                             'title': top.topic.title,
-                             'url': content.get_absolute_url()})
-
-    posts_unread.sort(cmp=comp)
+    posts_unread.sort(key=lambda post: post['pubdate'].timetuple())
 
     return posts_unread
 
 
 @register.filter('interventions_privatetopics')
 def interventions_privatetopics(user):
-
-    topics_never_read = list(PrivateTopicRead.objects
-                             .filter(user=user)
-                             .filter(privatepost=F('privatetopic__last_message')).all())
-
-    tnrs = []
-    for tnr in topics_never_read:
-        tnrs.append(tnr.privatetopic.pk)
-
-    privatetopics_unread = PrivateTopic.objects\
-        .filter(Q(author=user) | Q(participants__in=[user]))\
-        .exclude(pk__in=tnrs)\
-        .select_related("privatetopic")\
-        .order_by("-pubdate")\
-        .distinct()
-
-    return {'unread': privatetopics_unread}
+    """
+    Gets all unread messages in the user's inbox.
+    """
+    private_topic = ContentType.objects.get_for_model(PrivateTopic)
+    notifications = list(Notification.objects
+                         .get_unread_notifications_of(user)
+                         .filter(subscription__content_type=private_topic)
+                         .order_by('-pubdate'))
+    return {'notifications': notifications, 'total': len(notifications)}
 
 
 @register.filter(name='alerts_list')
 def alerts_list(user):
     total = []
-    alerts = Alert.objects.select_related("author").all().order_by('-pubdate')[:10]
+    alerts = Alert.objects.filter(solved=False).select_related('author', 'comment', 'content').order_by('-pubdate')[:10]
+    nb_alerts = Alert.objects.filter(solved=False).count()
     for alert in alerts:
-        if alert.scope == Alert.FORUM:
-            post = Post.objects.select_related("topic").get(pk=alert.comment.pk)
+        if alert.scope == 'FORUM':
+            post = Post.objects.select_related('topic').get(pk=alert.comment.pk)
             total.append({'title': post.topic.title,
                           'url': post.get_absolute_url(),
-                          'pubdate': post.pubdate,
+                          'pubdate': alert.pubdate,
                           'author': alert.author,
                           'text': alert.text})
-        if alert.scope == Alert.ARTICLE:
-            reaction = Reaction.objects.select_related("article").get(pk=alert.comment.pk)
-            total.append({'title': reaction.article.title,
-                          'url': reaction.get_absolute_url(),
-                          'pubdate': reaction.pubdate,
+        elif alert.scope == 'CONTENT':
+            published = PublishableContent.objects.select_related('public_version').get(pk=alert.content.pk)
+            total.append({'title': published.public_version.title if published.public_version else published.title,
+                          'url': published.get_absolute_url_online() if published.public_version else '',
+                          'pubdate': alert.pubdate,
                           'author': alert.author,
                           'text': alert.text})
-        if alert.scope == Alert.TUTORIAL:
-            note = Note.objects.select_related("tutorial").get(pk=alert.comment.pk)
-            total.append({'title': note.tutorial.title,
-                          'url': note.get_absolute_url(),
-                          'pubdate': note.pubdate,
+        else:
+            comment = ContentReaction.objects.select_related('related_content').get(pk=alert.comment.pk)
+            total.append({'title': comment.related_content.title,
+                          'url': comment.get_absolute_url(),
+                          'pubdate': alert.pubdate,
                           'author': alert.author,
                           'text': alert.text})
 
-    return total
+    return {'alerts': total, 'nb_alerts': nb_alerts}
 
 
-@register.filter(name='alerts_count')
-def alerts_count(user):
-    if user.is_authenticated():
-        return Alert.objects.count()
-    else:
-        return 0
+@register.filter(name='waiting_count')
+def waiting_count(content_type):
+    """
+    Gets the number of waiting contents of the specified type (without validator).
+    """
+    if content_type not in TYPE_CHOICES_DICT:
+        raise template.TemplateSyntaxError("'content_type' must be in 'zds.tutorialv2.models.TYPE_CHOICES_DICT'")
+
+    return Validation.objects.filter(
+        validator__isnull=True,
+        status='PENDING',
+        content__type=content_type).count()
+
+
+@register.filter(name='new_providers_count')
+def new_providers_count(user):
+    return NewEmailProvider.objects.count()
+
+
+@register.filter(name='requested_hats_count')
+def requested_hats_count(user):
+    return HatRequest.objects.filter(is_granted__isnull=True).count()

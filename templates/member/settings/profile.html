@@ -1,22 +1,36 @@
 {% extends "member/settings/base.html" %}
 {% load crispy_forms_tags %}
-
+{% load i18n %}
 
 
 {% block title %}
-   Mon profil
+    {% if user.profile == profile %}
+        {% trans "Modifier mon profil" %}
+    {% else %}
+        {% trans "Modifier le profil de" %} {{ profile.user.username }}
+    {% endif %}
 {% endblock %}
 
 
 
 {% block breadcrumb %}
-    <li>Mon profil</li>
+    <li>
+        {% if user.profile == profile %}
+            {% trans "Modifier mon profil" %}
+        {% else %}
+            {% trans "Modifier le profil de" %} {{ profile.user.username }}
+        {% endif %}
+    </li>
 {% endblock %}
 
 
 
 {% block headline %}
-    Mon profil
+    {% if user.profile == profile %}
+        {% trans "Modifier mon profil" %}
+    {% else %}
+        {% trans "Modifier le profil de" %} {{ profile.user.username }}
+    {% endif %}
 {% endblock %}
 
 

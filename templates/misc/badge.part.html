@@ -1,13 +1,13 @@
 {% load profile %}
-
+{% load i18n %}
 
 
 {% with status=member|state %}
-    {% if status == 'BAN'%}
-        <span class="badge banned {% if push_badge %}push-badge{% endif %}">Banni</span>
+    {% if status == 'DOWN'%}
+        <span class="badge {% if push_badge %}push-badge{% endif %}" title={% blocktrans %}"Compte inactif"{% endblocktrans %}>{% trans "Dead" %}</span>
+    {% elif status == 'BAN'%}
+        <span class="badge {% if push_badge %}push-badge{% endif %}">{% trans "Banni" %}</span>
     {% elif status == 'LS'%}
-        <span class="badge readonly {% if push_badge %}push-badge{% endif %}">LS</span>
-    {% elif status == 'STAFF' %}
-        <span class="badge staff {% if push_badge %}push-badge{% endif %}">Staff</span>
+        <span class="badge {% if push_badge %}push-badge{% endif %}" title={% blocktrans %}"Lecture seule"{% endblocktrans %}>{% trans "LS" %}</span>
     {% endif %}
 {% endwith %}

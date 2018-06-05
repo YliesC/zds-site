@@ -1,66 +1,212 @@
+dist: trusty
+language: python
+sudo: required
+
+
+python:
+  - 3.4
+
+
+addons:
+  firefox: "latest"
+  apt:
+    packages:
+      - mysql-server-5.6
+      - mysql-client-core-5.6
+      - mysql-client-5.6
+      - libmysqlclient-dev
+      - language-pack-fr
+      - unzip
+      - oracle-java9-set-default
+
+
 git:
   depth: 1
 
-language: python
 
-python:
-  - 2.7
+matrix:
+  fast_finish: true
+
+
+env:
+  global:
+    - secure: "azmDZZQZzf88zpbkYpLpxI66vpEVyv+kniW0QdWAt4qlys8P5OcO3VJBR5YT85vlvnjN9b6raWQAL1ymee0WmVdTmzXed8XjZv7t9QXVw7pfezxMKlEftVp/4Cu4wtvbew0ViZXNWV2hNXHzEqlhgnoIOq94i0UzZ7grMrI0xm0="
+  matrix:
+    - ZDS_TEST_JOB="zds.tutorialv2"
+    - ZDS_TEST_JOB="zds.member zds.utils zds.forum"
+    - ZDS_TEST_JOB="front zds.mp zds.gallery zds.pages zds.featured zds.notification zds.searchv2"
+    - ZDS_TEST_JOB="selenium"
+    - ZDS_TEST_JOB="doc"
 
 notifications:
-  irc:
-    channels:
-      - irc.smoothirc.net#zds-dev
-    skip_join: true
+  webhooks:
+    urls:
+      - "https://scalar.vector.im/api/neb/services/hooks/dHJhdmlzLWNpLyU0MHNhbmRob3NlJTNBc2FuZGhvc2UuZnIvJTIxd2dlbkt2dHpNY3NYREtiZEhZJTNBbWF0cml4Lm9yZw"
+    on_success: change
+    on_failure: always
+    on_start: never
+
+
+services:
+  - memcached
+
 
 cache:
-  - apt
-  - pip
+  apt: true
+  pip: true
+  yarn: true
+  directories:
+    - $HOME/.fonts
+    - $HOME/.texlive
+    - $HOME/bin
+    - node_modules
+
+
+before_install:
+  - . ./scripts/ci_turbo.sh # This script exports environment variables, it must be sourced
+
+  - travis_retry pip install -q coveralls
+
+  - |
+    # install elasticsearch
+    if [[ "$ZDS_TEST_JOB" == *"zds.searchv2"* ]]; then
+      # see https://docs.travis-ci.com/user/database-setup/#Installing-specific-versions-of-ElasticSearch
+      curl -O https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-5.5.2.deb \
+      && sudo dpkg -i --force-confnew elasticsearch-5.5.2.deb \
+      && sudo service elasticsearch start
+    fi
+
+  - |
+    # setup mysql
+    if [[ "$ZDS_TEST_JOB" == *"zds."* ]] || [[ "$ZDS_TEST_JOB" == *"selenium"* ]]; then
+      # MySQL config
+      ./scripts/ci_mysql_setup.sh
+    fi
 
 install:
-  # APT Stuff
-  - sudo apt-get update
-  - sudo echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
-  - sudo apt-get install ttf-mscorefonts-installer
-  - sudo apt-get install unzip
-  - sudo apt-get install texlive
-  - sudo apt-get install texlive-xetex
-  - sudo apt-get install texlive-lang-french
-  - sudo apt-get install texlive-latex-extra
+  - |
+    # install webdriver for selenium.
+    if [[ "$ZDS_TEST_JOB" == *"selenium"* ]]; then
+      wget https://github.com/mozilla/geckodriver/releases/download/v0.19.1/geckodriver-v0.19.1-linux64.tar.gz \
+      && mkdir geckodriver \
+      && tar -xzf geckodriver-v0.19.1-linux64.tar.gz -C geckodriver \
+      && export PATH=$PATH:$PWD/geckodriver \
+      && export DISPLAY=:99.0
+    fi
 
-  # Add fonts
-  - sudo wget -P /usr/share/fonts/truetype https://www.dropbox.com/s/ema28tjn52960mq/Merriweather.zip
-  - sudo unzip /usr/share/fonts/truetype/Merriweather.zip -d /usr/share/fonts/truetype/Merriweather/
-  - sudo chmod a+r /usr/share/fonts/truetype/Merriweather/*.ttf
-  - sudo fc-cache -f -v
+  - |
+    if [[ "$ZDS_TEST_JOB" == *"zds.tutorialv2"* ]]; then
+      # install latex
+      mkdir -p $HOME/bin \
+      && ./scripts/install_resources.sh && ./scripts/install_fonts.sh \
+      && export PATH=$HOME/.texlive/bin/x86_64-linux:$PATH \
+      && export PATH=$PATH:$HOME/bin
+    fi
 
-  # Cabal + Pandoc stuff
-  - sudo mkdir -p ~/cabal/bin
-  - sudo mkdir -p ~/.pandoc
-  - sudo wget -P ~/cabal/bin https://dl.dropboxusercontent.com/u/18967337/pandoc
-  - sudo wget -P ~/.pandoc/templates https://dl.dropboxusercontent.com/u/14517385/dev/default.epub
-  - sudo wget -P ~/.pandoc/templates https://dl.dropboxusercontent.com/u/14517385/dev/default.html
-  - sudo touch ~/.pandoc/epub.css
-  - sudo touch ~/.pandoc/templates/epub.css
-  - sudo chmod u+x,g+x,o+x ~/cabal/bin/pandoc
-  - export PATH=$PATH:~/cabal/bin
-  - sudo ~/cabal/bin/pandoc --version
-  - sudo apt-get --reinstall install -qq language-pack-fr
+  - |
+    # install and run zmarkdown
+    nvm install 8 \
+    && nvm use 8 \
+    && npm i -g pm2 zmarkdown \
+    && cd "$(nvm which current | sed s/bin/lib/)_modules/zmarkdown/" \
+    && npm run server \
+    && cd $TRAVIS_BUILD_DIR
 
-  # Python dependencies
-  - travis_retry pip install -r requirements.txt
-  - travis_retry pip install coveralls
+  - |
+    # install frontend+zmarkdown dependencies
+    npm i -g yarn \
+    && yarn --silent
 
-  # NodeJS + NPM stuff
-  - sudo add-apt-repository -y ppa:chris-lea/node.js
-  - sudo apt-get -y update
-  - sudo apt-get -y install nodejs
-  - npm install -g bower gulp
-  - npm install
+  - |
+    # install backend dependencies
+    if [[ "$ZDS_TEST_JOB" == *"zds."* ]] || [[ "$ZDS_TEST_JOB" == *"selenium"* ]] || [[ "$ZDS_TEST_JOB" == *"doc"* ]]; then
+      pip install -q -r requirements-dev.txt -r requirements-prod.txt
+    fi
+
 
 script:
-  - npm run-script travis
-  - coverage run --source='.' manage.py test
-  - flake8 --exclude=migrations,urls.py,settings.py --max-line-length=120 zds
+  - |
+    # lint backend
+    if [[ "$ZDS_TEST_JOB" == *"zds.gallery"* ]]; then
+      ./scripts/no_import_zds_settings.sh \
+      && flake8 \
+      && flake8 --config=zds/settings/.flake8 zds/settings
+    fi
+
+  - |
+    # test and build frontend
+    if [[ "$ZDS_TEST_JOB" == *"front"* ]]; then
+      yarn test \
+      && yarn build # we need to upload the assets later
+    fi
+  - |
+    # test backend
+    if [[ "$ZDS_TEST_JOB" == *"zds."* ]]; then
+      python manage.py makemigrations --dry-run --check \
+      && coverage run --source='.' manage.py \
+        test \
+        --keepdb \
+        --settings zds.settings.ci_test \
+        --exclude-tag=front \
+        ${ZDS_TEST_JOB/front/}
+    fi
+
+  - |
+    # show zmarkdown logs
+    if [[ "$ZDS_TEST_JOB" == *"zds."* ]]; then
+      pm2 logs --nostream --raw --lines 1000
+    fi
+
+  - |
+    # selenium tests
+    if [[ "$ZDS_TEST_JOB" == *"selenium"* ]]; then
+      yarn build
+      xvfb-run --server-args="-screen 0 1280x720x8" python manage.py \
+        test \
+        --settings zds.settings.ci_test \
+        --tag=front \
+        --keepdb
+    fi
+
+  - |
+    # test and build frontend
+    if [[ "$ZDS_TEST_JOB" == *"doc"* ]]; then
+      make --directory doc html
+    fi
 
 after_success:
-  - coveralls
+  - du -sh $HOME/.texlive 2>/dev/null | true
+
+  - |
+    # upload coverage
+    if [[ "$ZDS_TEST_JOB" != "none" ]]; then
+      coveralls
+    fi
+
+  - |
+    # upload compiled assets
+    COMMIT_MSG=`git rev-list --format=%B --max-count=1 $TRAVIS_COMMIT`
+    if [[ "$ZDS_TEST_JOB" == *"front"* ]] && [[ "$TRAVIS_PULL_REQUEST" == false ]] && [[ ! -z "$TRAVIS_TAG" ]] && [[ ! "$TRAVIS_TAG" == *"-build" ]]
+    then
+      # Adding GitHub OAuth token to login
+      echo -e "machine github.com login $BOT_LOGIN\n password $BOT_PASSWORD" > $HOME/.netrc
+      git config --global url."https://".insteadOf git://
+      git config --global user.name "Build bot"
+      git config --global user.email "zestedesavoir@gmail.com"
+      git config --global push.default simple
+
+      # Run script
+      ./scripts/push_front.sh $TRAVIS_TAG
+    fi
+
+  - |
+    # upload built documentation to GitHub Pages
+    if [[ "$ZDS_TEST_JOB" == *"doc"* ]] && [[ "$TRAVIS_BRANCH" == "dev" ]]; then
+      # Adding GitHub OAuth token to login
+      echo -e "machine github.com login $BOT_LOGIN\n password $BOT_PASSWORD" > $HOME/.netrc \
+      && git config --global url."https://".insteadOf git:// \
+      && git config --global user.name "Build bot" \
+      && git config --global user.email "zestedesavoir@gmail.com" \
+      && git config --global push.default simple \
+      && ./scripts/push_doc.sh
+    fi

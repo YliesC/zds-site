@@ -1,47 +1,54 @@
 {
   "name": "zds-site",
   "version": "0.2.0",
-  "description": "Site internet communautaire codé à l'aide du Framework Django 1.6",
+  "description": "Site internet communautaire codé à l'aide du Framework Django 1.10",
   "directories": {
     "doc": "doc"
   },
+  "engines": {
+    "node": ">=8.0.0"
+  },
   "scripts": {
+    "gulp": "gulp",
+    "lint": "gulp js:lint",
+    "travis": "gulp test && gulp build",
     "test": "gulp test",
-    "postinstall": "bower install",
-    "postupdate": "bower install",
-    "travis": "gulp travis"
+    "build": "gulp build",
+    "clean": "gulp clean"
   },
   "repository": {
     "type": "git",
     "url": "git://github.com/zestedesavoir/zds-site.git"
   },
-  "license": "GPLv3",
+  "license": "GPL-3.0",
   "bugs": {
     "url": "https://github.com/zestedesavoir/zds-site/issues"
   },
   "homepage": "https://github.com/zestedesavoir/zds-site",
   "dependencies": {
-    "gulp": "^3.7.0",
-    "gulp-autoprefixer": "0.0.9",
-    "gulp-cache": "^0.2.1",
-    "gulp-compass": "^1.1.9",
-    "gulp-concat": "^2.2.0",
-    "gulp-filter": "^1.0.0",
-    "gulp-flatten": "0.0.2",
-    "gulp-imagemin": "^1.0.1",
-    "gulp-jshint": "^1.6.2",
-    "gulp-livereload": "^2.0.0",
-    "gulp-load-plugins": "^0.5.1",
-    "gulp-minify-css": "^0.3.4",
-    "gulp-newer": "^0.3.0",
-    "gulp-rename": "^1.2.0",
-    "gulp-rimraf": "^0.1.0",
-    "gulp-sass": "^0.7.2",
-    "gulp-size": "^1.0.0",
-    "gulp-uglify": "^0.3.0",
-    "gulp-zip": "^2.0.1",
-    "gulp.spritesmith": "^1.1.0",
-    "jshint-stylish": "^0.4.0",
-    "main-bower-files": "^2.0.0"
+    "autoprefixer": "^7.2.6",
+    "body-parser": "^1.18.2",
+    "cookies-eu-banner": "^1.2.10",
+    "cssnano": "3.10.0",
+    "del": "3.0.0",
+    "git-rev": "^0.2.1",
+    "gulp": "3.9.1",
+    "gulp-concat": "2.6.1",
+    "gulp-imagemin": "4.1.0",
+    "gulp-postcss": "7.0.1",
+    "gulp-sass": "3.1.0",
+    "gulp-sourcemaps": "^2.6.4",
+    "gulp-uglify": "3.0.0",
+    "gulp.spritesmith": "6.5.1",
+    "highlight.js": "^9.12.0",
+    "jquery": "3.2.1",
+    "katex": "^0.9.0",
+    "normalize.css": "7.0.0"
+  },
+  "devDependencies": {
+    "gulp-jshint": "2.1.0",
+    "gulp-livereload": "3.8.1",
+    "jshint": "2.9.5",
+    "jshint-stylish": "2.2.1"
   }
 }

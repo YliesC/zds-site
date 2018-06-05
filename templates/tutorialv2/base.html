@@ -1,0 +1,166 @@
+{% extends "base_content_page.html" %}
+{% load captureas %}
+{% load i18n %}
+
+
+
+{% block title_base %}
+    {% if current_content_type == "OPINION" %}
+        &bull; {% trans "Tribune" %}
+    {% else %}
+        &bull; {% trans "Bibliothèque" %}
+    {% endif %}
+{% endblock %}
+
+
+
+{% block mobile_title %}
+    {% if current_content_type == "OPINION" %}
+        {% trans "Tribune" %}
+    {% else %}
+        {% trans "Bibliothèque" %}
+    {% endif %}
+{% endblock %}
+
+
+{% block menu_publications %}
+    {% if current_content_type and current_content_type != "OPINION" %}
+        current
+    {% endif %}
+    {%  if content and content.type != "OPINION" %}
+        current
+    {% endif %}
+{% endblock %}
+{% block menu_opinion %}
+    {% if current_content_type == "OPINION" %}
+        current
+    {% endif %}
+    {%  if content and content.type == "OPINION" %}
+        current
+    {% endif %}
+{% endblock %}
+
+
+{% block breadcrumb_base %}
+    {% if user in content.authors.all %}
+        {% if content.type == 'TUTORIAL' %}
+            <li><a href="{% url 'content:find-tutorial' user.pk %}">{% trans "Tutoriels de" %} {{ user.username }}</a></li>
+        {% elif content.type == 'ARTICLE' %}
+            <li><a href="{% url 'content:find-article' user.pk %}">{% trans "Articles de" %} {{ user.username }}</a></li>
+        {% elif content.type == 'OPINION' %}
+            <li><a href="{% url 'content:find-opinion' user.pk %}">{% trans "Tribune de" %} {{ user.username }}</a></li>
+        {% endif %}
+    {% elif content %}
+        <li itemscope itemtype="http://data-vocabulary.org/Breadcrumb">
+            {% if content.type == 'TUTORIAL' %}
+                <a href="{% url 'publication:list' %}?type=tutorial" itemprop="url"><span itemprop="title">{% trans "Tutoriels" %}</span></a>
+            {% elif content.type == 'ARTICLE' %}
+                <a href="{% url 'publication:list' %}?type=article" itemprop="url"><span itemprop="title">{% trans "Articles" %}</span></a>
+            {% elif content.type == 'OPINION' %}
+                <a href="{% url 'opinion:list' %}" itemprop="url"><span itemprop="title">{% trans "Tribunes" %}</span></a>
+            {% endif %}
+        </li>
+    {% endif %}
+{% endblock %}
+
+
+
+{% block sidebar %}
+    <aside class="sidebar summary mobile-menu-hide">
+        {% block sidebar_new %}{% endblock %}
+
+        {% captureas sidebaractions %}
+            {% block sidebar_actions %}{% endblock %}
+        {% endcaptureas %}
+
+        {% if sidebaractions %}
+            <div class="mobile-menu-bloc mobile-all-links mobile-show-ico" data-title="Actions">
+                <h3>{% trans "Actions" %}</h3>
+                <ul>
+                    {{ sidebaractions|safe }}
+                </ul>
+            </div>
+        {% endif %}
+
+        {% block sidebar_blocks %}{% endblock %}
+        {% if content %}
+            {% if content.is_public or content.in_beta or can_edit or is_staff %}
+                <div class="mobile-menu-bloc mobile-all-links mobile-show-ico" data-title="Télécharger">
+                    <h3>{% trans "Télécharger" %}</h3>
+                    <ul>
+                        {% if public_object %}
+                            {% if is_staff or is_author %}
+                                {% if public_object.have_md %}
+                                    <li>
+                                        <a href="{{ public_object.get_absolute_url_md }}" class="ico-after download blue">
+                                            {% trans "Markdown" %}
+                                            {% with size=public_object.get_size_md %}
+                                                {% if size %}
+                                                    ({{ size|filesizeformat }})
+                                                {% endif %}
+                                            {% endwith %}
+                                        </a>
+                                    </li>
+                                {% endif %}
+                            {% endif %}
+                            {% if public_object.has_html %}
+                                <li>
+                                    <a href="{{ public_object.get_absolute_url_html }}" class="ico-after download blue">
+                                        {% trans "HTML" %}
+                                        {% with size=public_object.get_size_html %}
+                                            {% if size %}
+                                                ({{ size|filesizeformat }})
+                                            {% endif %}
+                                        {% endwith %}
+                                    </a>
+                                </li>
+                            {% endif %}
+                            {% if public_object.has_pdf %}
+                                <li>
+                                    <a href="{{ public_object.get_absolute_url_pdf }}" class="ico-after download blue">
+                                        {% trans "PDF" %}
+                                        {% with size=public_object.get_size_pdf %}
+                                            {% if size %}
+                                                ({{ size|filesizeformat }})
+                                            {% endif %}
+                                        {% endwith %}
+                                    </a>
+                                </li>
+                            {% endif %}
+                            {% if public_object.has_epub %}
+                                <li>
+                                    <a href="{{ public_object.get_absolute_url_epub }}" class="ico-after download blue">
+                                        {% trans "EPUB" %}
+                                        {% with size=public_object.get_size_epub %}
+                                            {% if size %}
+                                                ({{ size|filesizeformat }})
+                                            {% endif %}
+                                        {% endwith %}
+                                    </a>
+                                </li>
+                            {% endif %}
+                            {% if public_object.has_zip %}
+                                <li>
+                                    <a href="{{ public_object.get_absolute_url_zip }}" class="ico-after download blue">
+                                        {% trans "Archive" %}
+                                        {% with size=public_object.get_size_zip %}
+                                            {% if size %}
+                                                ({{ size|filesizeformat }})
+                                            {% endif %}
+                                        {% endwith %}
+                                    </a>
+                                </li>
+                            {% endif %}
+                        {% else %}
+                            <li>
+                                <a href="{% url "content:download-zip" content.pk content.slug %}{% if version %}?version={{ version }}{% endif %}" class="ico-after download blue">
+                                    {% trans "Archive" %}
+                                </a>
+                            </li>
+                        {% endif %}
+                    </ul>
+                </div>
+            {% endif %}
+        {% endif %}
+    </aside>
+{% endblock %}

@@ -6,24 +6,30 @@ base.db
 /static
 /tutoriels-private
 /tutoriels-public
+/contents-private
+/contents-public
 /media
 /articles-data
+/zds/_version.py
 
 /tutoriels-private-test
 /tutoriels-public-test
 /media-test
 /articles-data-test
+/contents-private-test
+/contents-public-test
 
 /apache-solr
 
-/node_modules
-/dist
 /.tmp
-# Générés par Compass
-/assets/images/sprite*.png
-/assets/.sass-css
-/assets/bower_components
-/assets/scss/_sprite.scss
+
+/scripts/release_summary.md
+
+# Front files
+node_modules
+/dist
+/npm-debug.log
+/geckodriver.log
 
 #############
 ## Python
@@ -47,7 +53,6 @@ pip-log.txt
 
 # Unit test / coverage reports
 .coverage
-.tox
 htmlcov/
 
 #Translations
@@ -55,7 +60,6 @@ htmlcov/
 
 #Mr Developer
 .mr.developer.cfg
-
 
 #################
 ## Eclipse

@@ -1,26 +1,27 @@
 {% extends "gallery/base.html" %}
 {% load crispy_forms_tags %}
+{% load i18n %}
 
 
 
 {% block title %}
-    Nouvelle galerie
+    {% trans "Nouvelle galerie" %}
 {% endblock %}
 
 
 
 {% block breadcrumb %}
-    <li>Nouvelle galerie</li>
+    <li>{% trans "Nouvelle galerie" %}</li>
 {% endblock %}
 
 
 
 {% block headline %}
-    Nouvelle galerie
+    {% trans "Nouvelle galerie" %}
 {% endblock %}
 
 
 
 {% block content %}
-	{% crispy form %}
+    {% crispy form %}
 {% endblock %}

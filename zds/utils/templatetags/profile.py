@@ -1,62 +1,72 @@
-# coding: utf-8
-
 from django import template
-
 from django.contrib.auth.models import User
+from django.core.cache import cache
 
 from zds.member.models import Profile
-from zds.utils.models import Comment, CommentLike, CommentDislike
 
 
 register = template.Library()
 
 
 @register.filter('profile')
-def profile(user):
+def profile(current_user):
+    # we currently expect to receive a User in most cases, but as we move
+    # toward using Profiles instead, we have to handle them as well.
     try:
-        profile = user.profile
+        return current_user.profile
+    except AttributeError:
+        if isinstance(current_user, Profile):
+            return current_user
     except Profile.DoesNotExist:
-        profile = None
-    return profile
+        pass
+    return None
 
 
 @register.filter('user')
-def user(pk):
+def user(user_pk):
     try:
-        user = User.objects.get(pk=pk)
-    except:
-        user = None
-    return user
+        current_user = User.objects.get(pk=user_pk)
+    except User.DoesNotExist:
+        current_user = None
+    return current_user
+
+
+@register.filter(name='groups')
+def user_groups(user):
+    if user.pk is None:
+        user_identifier = 'unauthenticated'
+    else:
+        user_identifier = user.pk
+
+    key = 'user_pk={}_groups'.format(user_identifier)
+    groups = cache.get(key)
+
+    if groups is None:
+        try:
+            current_user_groups = User.objects.filter(pk=user.pk)\
+                                      .prefetch_related('groups').values_list('groups', flat=True)
+        except User.DoesNotExist:
+            current_user_groups = ['none']
+        groups = '{}-{}'.format(
+            'groups',
+            '-'.join(str(current_user_groups))
+        )
+        cache.set(key, groups, 4 * 60 * 60)
+    return groups
 
 
 @register.filter('state')
-def state(user):
+def state(current_user):
     try:
-        profile = user.profile
-        if not profile.user.is_active:
-            state = 'DOWN'
-        elif not profile.can_read_now():
-            state = 'BAN'
-        elif not profile.can_write_now():
-            state = 'LS'
-        elif user.has_perm('forum.change_post'):
-            state = 'STAFF'
+        user_profile = current_user.profile
+        if not user_profile.user.is_active:
+            user_state = 'DOWN'
+        elif not user_profile.can_read_now():
+            user_state = 'BAN'
+        elif not user_profile.can_write_now():
+            user_state = 'LS'
         else:
-            state = None
+            user_state = None
     except Profile.DoesNotExist:
-        state = None
-    return state
-
-
-@register.filter('liked')
-def liked(user, comment_pk):
-    comment = Comment.objects.get(pk=comment_pk)
-    return CommentLike.objects.filter(comments=comment, user=user).count() > 0
-
-
-@register.filter('disliked')
-def disliked(user, comment_pk):
-    comment = Comment.objects.get(pk=comment_pk)
-    return CommentDislike.objects.filter(
-        comments=comment,
-        user=user).count() > 0
+        user_state = None
+    return user_state

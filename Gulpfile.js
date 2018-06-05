@@ -1,186 +1,175 @@
-var gulp = require("gulp"),
-    $ = require("gulp-load-plugins")(),
-    path = require("path"),
-    spritesmith = require("gulp.spritesmith"),
-    mainBowerFiles = require('main-bower-files');
+const path = require('path');
+const livereload = require('gulp-livereload');
+const concat = require('gulp-concat');
+const del = require('del');
+const gulp = require('gulp');
+const imagemin = require('gulp-imagemin');
+const postcss = require('gulp-postcss');
+const sass = require('gulp-sass');
+const sourcemaps = require('gulp-sourcemaps');
+const spritesmith = require('gulp.spritesmith');
+const uglify = require('gulp-uglify');
+const jshint = require('gulp-jshint');
+const autoprefixer = require('autoprefixer');
+const cssnano = require('cssnano');
 
-var paths = {
-  scripts: ["assets/js/**", "!assets/js/_**"],
-  images: "assets/images/**",
-  smileys: "assets/smileys/**",
-  errors_main: "errors/scss/main.scss",
-  errors_path: "errors/scss/**",
-  errors: {
-    sass: "errors/scss",
-    images: "errors/images",
-    includePaths: ["errors/scss", "assets/bower_components/modularized-normalize-scss"],
-  },
-  styles_main: "assets/scss/main.scss",
-  styles_path: ["assets/scss/**", "!assets/scss/_sprite.scss"],
-  styles: {
-    sass: "assets/scss",
-    images: "assets/images",
-    includePaths: ["assets/scss", "assets/bower_components/modularized-normalize-scss"],
-  },
-  sprite: "assets/images/sprite@2x/*.png"
-};
+// PostCSS plugins used
+const postcssPlugins = [
+    autoprefixer({ browsers: ['last 2 versions', '> 1%', 'ie >= 9'] }),
+    cssnano()
+];
 
-
-
-gulp.task("clean", function() {
-  return gulp.src(["dist/*"], { read: false })
-    .pipe($.rimraf());
+const customSass = () => sass({
+    sourceMapContents: true,
+    includePaths: [
+        path.join(__dirname, 'node_modules'),
+        path.join(__dirname, 'dist', 'scss'),
+    ],
 });
 
-gulp.task("script", ["test"], function() {
-  return gulp.src(paths.scripts)
-    .pipe($.newer("dist/js/main.js"))
-    .pipe($.concat("main.js", { newLine: "\r\n\r\n" }))
-    .pipe(gulp.dest("dist/js"))
-    .pipe($.size({ title: "main.js" }))
-    .pipe($.rename({ suffix: ".min" }))
-    .pipe($.uglify())
-    .pipe(gulp.dest("dist/js"))
-    .pipe($.size({ title: "main.min.js" }));
+// Deletes the generated files
+gulp.task('clean', () => del([
+    'dist/',
+]));
+
+// Lint the js source files
+gulp.task('js:lint', () =>
+    gulp.src([
+        'assets/js/*.js',
+        '!assets/js/editor.js', // We'll fix that later
+    ])
+        .pipe(jshint())
+        .pipe(jshint.reporter('jshint-stylish'))
+        .pipe(jshint.reporter('fail')));
+
+// Concat and minify all the js files
+gulp.task('js', () =>
+    gulp.src([
+        require.resolve('jquery'),
+        require.resolve('cookies-eu-banner'),
+        // Used by other scripts, must be first
+        'assets/js/modal.js',
+        'assets/js/tooltips.js',
+
+        'assets/js/accessibility-links.js',
+        'assets/js/accordeon.js',
+        'assets/js/ajax-actions.js',
+        'assets/js/autocompletion.js',
+        'assets/js/close-alert-box.js',
+        'assets/js/compare-commits.js',
+        'assets/js/content-publication-readiness.js',
+        'assets/js/dropdown-menu.js',
+        'assets/js/editor.js',
+        'assets/js/featured-resource-preview.js',
+        'assets/js/form-email-username.js',
+        'assets/js/gallery.js',
+        'assets/js/index.js',
+        'assets/js/jquery-tabbable.js',
+        'assets/js/karma.js',
+        'assets/js/keyboard-navigation.js',
+        'assets/js/markdown-help.js',
+        'assets/js/message-hidden.js',
+        'assets/js/message-signature.js',
+        'assets/js/mobile-menu.js',
+        'assets/js/select-autosubmit.js',
+        'assets/js/snow.js',
+        'assets/js/spoiler.js',
+        'assets/js/submit-dbclick.js',
+        'assets/js/tab-modalize.js',
+        'assets/js/topic-suggest.js',
+        'assets/js/tribune-pick.js',
+        'assets/js/zen-mode.js',
+    ], { base: '.' })
+        .pipe(sourcemaps.init({ loadMaps: true }))
+        .pipe(concat('script.js', { newline: ';\r\n' }))
+        .pipe(uglify())
+        .on('error', function (err) {
+            // gulp-uglify sucks
+            console.log(err.toString());
+        })
+        .pipe(sourcemaps.write('.', { includeContent: true, sourceRoot: '../../' }))
+        .pipe(gulp.dest('dist/js/')));
+
+gulp.task('prepare-zmd', () =>
+    gulp.src(['node_modules/katex/dist/{katex.min.css,fonts/*}'])
+        .pipe(gulp.dest('dist/css/')));
+
+// Compiles the SCSS files to CSS
+gulp.task('css', ['css:sprite'], () =>
+    gulp.src(['assets/scss/main.scss', 'assets/scss/zmd.scss'])
+        .pipe(sourcemaps.init())
+        .pipe(customSass())
+        .pipe(postcss(postcssPlugins))
+        .pipe(sourcemaps.write('.', { includeContent: true, sourceRoot: '../../assets/scss/' }))
+        .pipe(gulp.dest('dist/css/')));
+
+// Generates a sprite
+gulp.task('css:sprite', () =>
+    gulp.src('assets/images/sprite/*.png')
+        .pipe(spritesmith({
+            cssTemplate: 'assets/scss/_sprite.scss.hbs',
+            cssName: 'scss/_sprite.scss',
+            imgName: 'images/sprite.png',
+            retinaImgName: 'images/sprite@2x.png',
+            retinaSrcFilter: 'assets/images/sprite/*@2x.png',
+        }))
+        .pipe(gulp.dest('dist/')));
+
+// Optimizes the images
+gulp.task('images', ['css:sprite'], () =>
+    gulp.src('assets/{images,smileys,licenses}/**/*')
+        .pipe(imagemin())
+        .pipe(gulp.dest('dist/'))
+);
+
+// Watch for file changes
+gulp.task('watch-runner', () => {
+    gulp.watch('assets/js/*.js', ['js']);
+    gulp.watch(['assets/{images,smileys}/**/*', '!assets/images/sprite*.png'], ['images']);
+    gulp.watch(['assets/scss/**/*.scss', '!assets/scss/_sprite.scss'], ['css']);
+
+    gulp.watch('dist/**/*', file =>
+         livereload.changed(
+            path.join('static/', path.relative(path.join(__dirname, 'dist/'), file.path))
+        )
+    );
+
+    livereload.listen();
 });
 
-gulp.task("clean-errors", function() {
-  return gulp.src(["errors/css/*"], { read: false })
-    .pipe($.rimraf());
+// https://github.com/gulpjs/gulp/issues/259#issuecomment-152177973
+gulp.task('watch', cb => {
+    function spawnGulp(args) {
+        return require('child_process')
+            .spawn(
+                'node_modules/.bin/gulp',
+                args,
+                {stdio: 'inherit'}
+            )
+    }
+
+    function spawnBuild() {
+        return spawnGulp(['build'])
+            .on('close', spawnWatch)
+    }
+
+    function spawnWatch() {
+        return spawnGulp(['watch-runner'])
+            .on('close', spawnWatch)
+    }
+
+    spawnBuild();
 });
 
-gulp.task("errors", ["clean-errors"], function() {
-  return gulp.src(paths.errors_main)
-    .pipe($.sass({
-      sass: paths.errors.sass,
-      imagePath: paths.errors.images,
-      includePaths: paths.errors.includePaths
-    }))
-    .pipe($.autoprefixer(["last 1 version", "> 1%", "ff >= 20", "ie >= 8", "opera >= 12", "Android >= 2.2"], { cascade: true }))
-    .pipe(gulp.dest("errors/css"))
-    .pipe($.rename({ suffix: ".min" })) // génère une version minimifié
-    .pipe($.minifyCss())
-    .pipe(gulp.dest("errors/css"));
-});
+// Compiles errors' CSS
+gulp.task('errors', () =>
+    gulp.src('errors/scss/main.scss')
+        .pipe(sourcemaps.init())
+        .pipe(customSass())
+        .pipe(postcss(postcssPlugins))
+        .pipe(sourcemaps.write('.', { includeContent: true, sourceRoot: '../scss/' }))
+        .pipe(gulp.dest('errors/css/')));
 
-gulp.task("stylesheet", ["sprite"], function() {
-  return gulp.src(paths.styles_main)
-    .pipe($.sass({
-      sass: paths.styles.sass,
-      imagePath: paths.styles.images,
-      includePaths: paths.styles.includePaths
-    }))
-    .pipe($.autoprefixer(["last 1 version", "> 1%", "ff >= 20", "ie >= 8", "opera >= 12", "Android >= 2.2"], { cascade: true }))
-    .pipe(gulp.dest("dist/css"))
-    .pipe($.rename({ suffix: ".min" })) // génère une version minimifié
-    .pipe($.minifyCss())
-    .pipe(gulp.dest("dist/css"));
-});
-
-gulp.task("sprite", function() {
-  var sprite = gulp.src(paths.sprite)
-    .pipe(spritesmith({
-      imgName: "sprite@2x.png",
-      cssName: "_sprite.scss",
-      cssTemplate: function(params) {
-        var output = "", e;
-        for(var i in params.items) {
-          e = params.items[i];
-          output += "$" + e.name + ": " + e.px.offset_x + " " + e.px.offset_y + ";\n";
-        }
-        if(params.items.length > 0) {
-          output += "\n\n";
-          output += "$sprite_height: " + params.items[0].px.total_height + ";\n";
-          output += "$sprite_width: " + params.items[0].px.total_width + ";";
-        }
-
-        return output;
-      }
-    }));
-  sprite.img
-    .pipe($.imagemin({ optimisationLevel: 3, progressive: true, interlaced: true }))
-    .pipe(gulp.dest("dist/images"));
-  sprite.css.pipe(gulp.dest(paths.styles.sass));
-  return sprite.css;
-});
-
-gulp.task("images", ["stylesheet"], function() {
-  return gulp.src(paths.images)
-    .pipe($.newer("dist/images"))
-    .pipe($.cache($.imagemin({ optimizationLevel: 3, progressive: true, interlaced: true })))
-    .pipe($.size())
-    .pipe(gulp.dest("dist/images"));
-});
-
-gulp.task("smileys", function() {
-  return gulp.src(paths.smileys)
-    .pipe($.newer("dist/smileys"))
-    .pipe($.cache($.imagemin({ optimizationLevel: 3, progressive: true, interlaced: true })))
-    .pipe($.size())
-    .pipe(gulp.dest("dist/smileys"));
-});
-
-gulp.task("vendors", function() {
-  var vendors = mainBowerFiles();
-  vendors.push("assets/js/_**");
-
-  return gulp.src(vendors)
-    .pipe($.newer("dist/js/vendors.js"))
-    .pipe($.flatten()) // remove folder structure
-    .pipe($.size({ title: "vendors", showFiles: true }))
-    .pipe($.concat("vendors.js"))
-    .pipe($.size({ title: "vendors.js" }))
-    .pipe(gulp.dest("dist/js"))
-    .pipe($.uglify())
-    .pipe($.rename("vendors.min.js"))
-    .pipe($.size({ title: "vendors.min.js" }))
-    .pipe(gulp.dest("dist/js"));
-});
-
-gulp.task("merge-scripts", ["script", "vendors"], function() {
-  return gulp.src("dist/js/{vendors,main}.min.js")
-    .pipe($.concat("all.min.js"))
-    .pipe($.size())
-    .pipe(gulp.dest("dist/js/"));
-});
-
-gulp.task("watch", function(cb) {
-  gulp.watch(paths.scripts, ["script"]);
-  gulp.watch(paths.smiley, ["smileys"]);
-  gulp.watch(paths.images, ["images"]);
-  gulp.watch(paths.styles_path, ["stylesheet"]);
-  gulp.watch(paths.errors_path, ["errors"]);
-  gulp.watch(paths.sprite, ["stylesheet"]); // stylesheet task already lauch sprite
-
-  gulp.watch("dist/*/**", function(file) {
-    var filePath = path.join("static/", path.relative(path.join(__dirname, "dist/"), file.path)); // Pour que le chemin ressemble à static/.../...
-    $.livereload.changed(filePath);
-  });
-
-  gulp.watch("errors/*/**", function(file) {
-    setImmediate(function(){
-      $.livereload.changed(file.path);
-    });
-  });
-
-  $.livereload.listen();
-});
-
-gulp.task("test", function() {
-  return gulp.src(paths.scripts)
-    .pipe($.jshint())
-    .pipe($.jshint.reporter("jshint-stylish"));
-});
-
-gulp.task("pack", ["build"], function() {
-  return gulp.src(["dist/*/**", "!dist/pack.zip"])
-    .pipe($.zip("pack.zip"))
-    .pipe(gulp.dest("dist/"));
-});
-
-
-gulp.task("travis", ["pack"]);
-
-gulp.task("build", ["smileys", "images", "sprite", "stylesheet", "merge-scripts"]);
-
-gulp.task("default", ["build", "watch"]);
+gulp.task('test', ['js:lint']);
+gulp.task('build', ['prepare-zmd', 'css', 'js', 'images']);
+gulp.task('default', ['watch', 'test']);

@@ -12,33 +12,38 @@
         this.$input = this.$wrapper.find(".autocomplete-input");
         this.$dropdown = this.$wrapper.find(".autocomplete-dropdown");
 
-        this.$dropdown.css({
-            "marginTop": "-" + this.$input.css("margin-bottom"),
-            "left": this.$input.css("margin-left")
-        });
 
         this.$input.on("keyup", this.handleInput.bind(this));
         this.$input.on("keydown", this.handleKeydown.bind(this));
         this.$input.on("blur", this.hideDropdown.bind(this));
 
+        this.options = options;
+
+        if(this.options.type === "multiple") {
+            this.$form = this.$wrapper.parents("form:first");
+            this.$form.on("submit", this.handleSubmit.bind(this));
+        }
+
+        if(this.options.clickable) {
+          this.$dropdown.css("font-weight","bold");
+        }
+
         this.selected = -1;
 
         this._lastInput = "";
-
-        this.options = options;
     }
 
     AutoComplete.prototype = {
         cache: {},
 
-        handleKeydown: function(e){
+        handleKeydown: function(e) {
             var $tmp;
-            switch(e.which){
+            switch (e.which) {
                 case 38: // Up
                     e.preventDefault();
                     e.stopPropagation();
 
-                    if(this.selected === -1){
+                    if (this.selected === -1) {
                         this.select(this.$dropdown.find("ul li").last().attr("data-autocomplete-id"));
                     } else {
                         $tmp = this.$dropdown.find("ul li[data-autocomplete-id=" + this.selected + "]").prev("li");
@@ -49,7 +54,7 @@
                     e.preventDefault();
                     e.stopPropagation();
 
-                    if(this.selected === -1){
+                    if (this.selected === -1) {
                         this.select(this.$dropdown.find("ul li").first().attr("data-autocomplete-id"));
                     } else {
                         $tmp = this.$dropdown.find("ul li[data-autocomplete-id=" + this.selected + "]").next("li");
@@ -65,15 +70,15 @@
             }
         },
 
-        handleInput: function(e){
-            if(e && (e.which === 38 || e.which === 40 || e.which === 13)){ 
+        handleInput: function(e) {
+            if (e && (e.which === 38 || e.which === 40 || e.which === 13)) {
                 e.preventDefault();
                 e.stopPropagation();
             }
 
             var input = this.$input.val();
 
-            if(this._lastInput === input)
+            if (this._lastInput === input)
                 return;
 
             this._lastInput = input;
@@ -81,77 +86,89 @@
             var search = this.parseInput(input),
                 self = this;
 
-            if(!search || search === this._lastAutocomplete){
+            if (!search || search === this._lastAutocomplete) {
                 this.hideDropdown();
             } else {
-                this.fetchUsers(search)
-                    .done(function(data){
-                        self.updateCache(data);
-                        self.updateDropdown(self.sortList(data, search));
-                    })
-                    .fail(function(){
-                        console.error("[Autocompletition] Something went wrong...");
-                    })
-                ;
-                this.updateDropdown(this.sortList(this.searchCache(search), search));
-                this.showDropdown();
+                if (!this.options.minLength || search.length >= this.options.minLength) {
+                  this.fetchData(search)
+                  .done(function(data) {
+                    self.updateCache(data.results);
+                    self.updateDropdown(self.sortList(data.results, search));
+                  })
+                  .fail(function() {
+                    console.error("[Autocompletition] Something went wrong...");
+                  });
+                  this.updateDropdown(this.sortList(this.searchCache(search), search));
+                  this.showDropdown();
+                }
             }
         },
 
-        showDropdown: function(){
-            if(this.$input.is("input"))
+        handleSubmit: function() {
+            var content = this.$input.val();
+            if(content.slice(-2) === ", ") {
+                this.$input.val(content.slice(0, -2));
+            }
+        },
+
+        showDropdown: function() {
+            if (this.$input.is("input"))
                 this.$dropdown.css("width", this.$input.outerWidth());
             this.$dropdown.show();
         },
 
-        hideDropdown: function(){
+        hideDropdown: function() {
             this.$dropdown.hide();
         },
 
-        select: function(id){
+        select: function(id) {
             this.selected = id;
             this.$dropdown.find("ul li.active").removeClass("active");
             this.$dropdown.find("ul li[data-autocomplete-id=" + this.selected + "]").addClass("active");
         },
 
-        enter: function(selected){
+        enter: function(selected) {
             selected = selected || this.selected;
             var input = this.$input.val();
             var lastChar = input.substr(-1);
-            if((lastChar === "," || selected === -1) && this.options.type === "multiple")
+            if ((lastChar === "," || selected === -1) && this.options.type === "multiple")
                 return false;
 
             var completion = this.getFromCache(selected);
-            if(!completion)
+            if (!completion)
                 return false;
 
-            if(this.options.type === "multiple") {
+            if (this.options.type === "multiple") {
                 var lastComma = input.lastIndexOf(",");
-                if(lastComma !== -1){
-                    input = input.substr(0, lastComma + 2) + completion.value + ", ";
+                if (lastComma !== -1) {
+                    input = input.substr(0, lastComma) + ", " + completion[this.options.fieldname] + ", ";
                     this.$input.val(input);
                 } else {
-                    this.$input.val(completion.value + ", ");
+                    this.$input.val(completion[this.options.fieldname] + ", ");
                 }
-            }
-            else {
-                this.$input.val(completion.value);
+            } else {
+                this.$input.val(completion[this.options.fieldname]);
             }
 
-            this._lastAutocomplete = completion.value;
+            this._lastAutocomplete = completion[this.options.fieldname];
+            this.selected = -1; // Deselect properly
+            this.$input.trigger("input");
+
+            if(this.options.clickable) {
+              window.open(completion.url, "_blank");
+            }
         },
 
-        updateCache: function(data){
-            for(var i = 0; i < data.length; i++){
-                this.cache[data[i].value] = data[i];
+        updateCache: function(data) {
+            for (var i = 0; i < data.length; i++) {
+                this.cache[data[i][this.options.fieldname]] = data[i];
             }
         },
 
-        extractWords: function(input){
-            //input = input.replace(/ /g, ","); // Replace space with comas
+        extractWords: function(input) {
             var words = $.grep(
-                $.map(input.split(","), $.trim),  // Remove empty
-                function(e){
+                $.map(input.split(","), $.trim), // Remove empty
+                function(e) {
                     return e === "" || e === undefined;
                 },
                 true
@@ -160,42 +177,48 @@
             return words;
         },
 
-        parseInput: function(input){
-            if(this.options.type === "multiple") {
-                if(input.substr(-1) === "," || input.substr(-2) === ", ")
+        parseInput: function(input) {
+            if (this.options.type === "multiple") {
+                if (input.substr(-1) === "," || input.substr(-2) === ", ")
                     return false;
 
                 var words = this.extractWords(input);
-                if(words.length === 0) return false;
+                if (words.length === 0) return false;
 
                 return words[words.length - 1]; // last word in list
-            }
-            else {
+            } else {
                 return input;
             }
         },
 
-        searchCache: function(input){
+        searchCache: function(input) {
             var regexp = new RegExp(input, "ig");
             return $.grep(
                 this.cache,
-                function(e){
-                    return e.value.match(regexp);
+                function(e) {
+                    return e.this.options.fieldname.match(regexp);
                 }
             );
         },
 
-        getFromCache: function(id){
-            for(var i in this.cache){
-                if(parseInt(this.cache[i].id) === parseInt(id))
+        getFromCache: function(id) {
+            for (var i in this.cache) {
+                if (parseInt(this.cache[i].id) === parseInt(id))
                     return this.cache[i];
             }
             return false;
         },
 
-        updateDropdown: function(list){
+        filterData: function(data, exclude) {
+            var fieldname = this.options.fieldname;
+            return data.filter(function(e) {
+                return exclude.indexOf(e[fieldname]) === -1;
+            });
+        },
+
+        updateDropdown: function(list) {
             var self = this;
-            var onClick = function(e){
+            var onClick = function(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 self.enter($(this).attr("data-autocomplete-id"));
@@ -203,13 +226,18 @@
                 self.handleInput();
             };
 
-            if(list.length > this.options.limit) list = list.slice(0, this.options.limit);
+            list = self.filterData(list, self.extractWords(this.$input.val()));
 
-            var $list = $("<ul>"), $el, selected = false;
-            for(var i in list){
-                $el = $("<li>").text(list[i].value);
+            if (list.length > this.options.limit) list = list.slice(0, this.options.limit);
+
+            var $list = $("<ul>"),
+                $el, selected = false;
+            for (var i in list) {
+                if ($("#my-account .username").text() === list[i][this.options.fieldname])
+                    continue;
+                $el = $("<li>").text(list[i][this.options.fieldname]);
                 $el.attr("data-autocomplete-id", list[i].id);
-                if(list[i].id === this.selected){
+                if (list[i].id === this.selected) {
                     $el.addClass("active");
                     selected = true;
                 }
@@ -218,40 +246,44 @@
                 $list.append($el);
             }
             this.$dropdown.children().remove();
+            if(this.options.header && $list[0].childElementCount) {
+              this.$dropdown.append("<div class=\"autocomplete-dropdown-header\">" + this.options.header + "</div>");
+            }
             this.$dropdown.append($list);
 
-            if(!selected)
+            if (!selected)
                 this.select($list.find("li").first().attr("data-autocomplete-id"));
         },
 
         sortList: function(list, search) {
-            var bestMatches = [], otherMatches = [];
+            var bestMatches = [],
+                otherMatches = [];
 
-            for(var i = 0; i < list.length; i++) {
-                if(list[i].value.indexOf(search) === 0) {
+            for (var i = 0; i < list.length; i++) {
+                if (list[i][this.options.fieldname].indexOf(search) === 0) {
                     bestMatches.push(list[i]);
-                }
-                else {
+                } else {
                     otherMatches.push(list[i]);
                 }
             }
 
             var sortFn = function(a, b) {
-                var valueA = a.value.toLowerCase(), valueB = b.value.toLowerCase();
+                var valueA = a[this.options.fieldname].toLowerCase(),
+                    valueB = b[this.options.fieldname].toLowerCase();
                 if (valueA < valueB)
-                    return -1 ;
+                    return -1;
                 if (valueA > valueB)
                     return 1;
                 return 0;
             };
 
-            bestMatches.sort(sortFn);
-            otherMatches.sort(sortFn);
+            bestMatches.sort(sortFn.bind(this));
+            otherMatches.sort(sortFn.bind(this));
 
             return bestMatches.concat(otherMatches);
         },
 
-        fetchUsers: function(input) {
+        fetchData: function(input) {
             return $.getJSON(this.options.url.replace("%s", input));
         }
     };
@@ -263,25 +295,24 @@
             }),
             $dropdown = $("<div/>", {
                 "class": "autocomplete-dropdown"
-            })
-        ;
+            });
 
         return $input.addClass("autocomplete-input")
             .attr("autocomplete", "off")
             .wrap($wrapper)
             .parent()
-            .append($dropdown)
-        ;
+            .append($dropdown);
     }
 
     $.fn.autocomplete = function(options) {
-        var defaults = {
+        var defaults = { // defaults are set for pm member autocomplete
             type: "single", // single|multiple|mentions
-            url: "/membres/?q=%s",
-            limit: 4
+            url: "/api/membres/?search=%s",
+            limit: 4,
+            fieldname: "username"
         };
 
-        if(!options) {
+        if (!options) {
             options = $(this).data("autocomplete");
         }
 
@@ -289,11 +320,9 @@
     };
 
     $(document).ready(function() {
-        $("[data-autocomplete]").autocomplete();
-        $("#content").on("DOMNodeInserted", "input", function(e){
-            var $input = $(e.target);
-            if($input.is("[data-autocomplete]"))
-                $input.autocomplete();
+        $("[data-autocomplete]").each(function () {
+          if ($(this).data)
+              $(this).autocomplete();
         });
     });
 })(jQuery);

@@ -1,64 +1,99 @@
 {% load date %}
 {% load profile %}
+{% load i18n %}
+{% load pluralize_fr %}
 
+<div class="topic
+            navigable-elem
 
-
-<div class="topic navigable-elem
-    {% if user.is_authenticated and topic.never_read %}
-        unread
-    {% endif %}">
+            {% if user.is_authenticated and topic.pk not in topic_read %}
+                unread
+            {% endif %}">
 
     <div class="topic-infos">
         {% if topic.is_sticky %}
-            <span class="ico-after pin blue">[Epinglé]</span>
+            <span class="ico-after pin blue" title="{% trans 'Sujet épinglé' %}">[{% trans "Épinglé" %}]</span>
         {% endif %}
         {% if topic.is_solved %}
-            <span class="ico-after tick green">[Résolu]</span>
+            <span class="ico-after tick green" title="{% blocktrans %} L’auteur a trouvé une solution à son problème {% endblocktrans %}">[{% trans "Résolu" %}]</span>
         {% endif %}
         {% if topic.is_locked %}
-            <span class="ico-after lock blue">[Fermé]</span>
+            <span class="ico-after lock blue" title="{% trans 'Sujet fermé' %}">[{% trans "Fermé" %}]</span>
+        {% endif %}
+        {% if topic.is_followed %}
+            <span class="ico-after star blue" title="{% trans 'Sujet suivi' %}">[{% trans "Suivi" %}]</span>
         {% endif %}
     </div>
+
     {% with profile=topic.author|profile %}
         <div class="topic-description">
-            <a href="{{ topic.get_absolute_url }}" class="topic-title-link navigable-link">
-                <span class="topic-title" itemprop="itemListElement">{{ topic.title }}</span>
+            {% if topic.tags.all %}
+                <ul class="topic-tags">
+                    {% for tag in topic.tags.all %}
+                        <li>
+                            <a href="{% url 'topic-tag-find' tag.slug %}" class="topic-tag" title="Tag {{ tag.title }}">
+                                {{ tag.title }}
+                            </a>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+            <a href="{{ topic.get_absolute_url }}" class="topic-title-link navigable-link" title="{{ topic.title }}. {{ topic.subtitle }}">
+                <h4 class="topic-title" itemprop="itemListElement">{{ topic.title }}</h4>
                 <span class="topic-subtitle">{{ topic.subtitle }}</span>
             </a>
-            <p class="topic-members">
-                <span class="topic-members-label">Créé par</span>
+            <span class="topic-members">
+                <span class="topic-members-label">{% trans "Par" %}</span>
                 <em>
                     {% include "misc/member_item.part.html" with member=topic.author %}
                 </em>
-                <span class="topic-members-label">{{ topic.pubdate|format_date }}</span>
-                {% if topic.tags.all %}
-                    - Tag{{ topic.tags.all|pluralize }} : 
-                    {% for tag in topic.tags.all %}
-                        <a href="{% url "zds.forum.views.find_topic_by_tag" tag.pk tag.slug %}" class="topic-tag">{{ tag.title }}</a>
-                    {% endfor %}
+                <span class="topic-members-label">
+                    -
+                    <span class="topic-members-long-date">
+                        {{ topic.pubdate|format_date|capfirst }}
+                    </span>
+                    <span class="topic-members-short-date">
+                        {{ topic.pubdate|format_date:True|capfirst }}
+                    </span>
+                </span>
+                {% if display_category %}
+                    {% trans "dans" %}
+                    <a href="{{ topic.forum.get_absolute_url }}" title="{{ topic.forum.title }}">
+                        {{ topic.forum.title }}
+                    </a>
                 {% endif %}
-            </p>
+            </span>
         </div>
     {% endwith %}
-    <p class="topic-answers">
-        {% with nb_post=topic.get_post_count %}
-            {% if nb_post > 1 %}
-                {{ nb_post|add:"-1" }} réponse{{ nb_post|add:"-1"|pluralize }}
-            {% endif %}
-        {% endwith %}
-    </p>
+
+    {% with nb_post=topic.get_post_count %}
+        <p class="topic-answers {% if nb_post <= 1 %}topic-no-answer{% endif %}">
+            {% blocktrans with plural=nb_post|pluralize_fr %}
+                {{ nb_post }} message{{ plural }}
+            {% endblocktrans %}
+        </p>
+    {% endwith %}
+
     <p class="topic-last-answer">
-        {% with answer=topic.get_last_answer last_read=topic.last_read_post %}
+        {% with answer=topic.get_last_answer last_read_url=topic.resolve_last_read_post_absolute_url %}
             {% if answer %}
-                <a href="{{ last_read.get_absolute_url }}">
-                    Dernière réponse <br>
-                    {{ answer.pubdate|format_date }}
+                <a href="{{ last_read_url }}">
+                    <span class="topic-last-answer-long-date">
+                        {% trans "Dernière réponse" %}
+                        <br>
+                        {{ answer.pubdate|format_date|capfirst }}
+                    </span>
+                    <span class="topic-last-answer-short-date">
+                        {{ answer.pubdate|format_date:True|capfirst }}
+                    </span>
                 </a>
                 <br>
-                par
-                {% include "misc/member_item.part.html" with member=answer.author %}
+                <span class="topic-last-answer-author">
+                    {% trans "par" %}
+                    {% include "misc/member_item.part.html" with member=answer.author %}
+                </span>
             {% else %}
-                <span class="topic-no-last-answer">Aucune réponse</span>
+                <span class="topic-no-last-answer">{% trans "Aucune réponse" %}</span>
             {% endif %}
         {% endwith %}
     </p>

@@ -1,111 +1,134 @@
-# encoding: utf-8
-
-from django.conf.urls import patterns, include, url
+from django.conf.urls import include, url
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.sitemaps import GenericSitemap, Sitemap
+from django.contrib.sitemaps.views import index as index_view, sitemap as sitemap_view
+from django.core.urlresolvers import get_resolver, reverse
 
-from zds.article.models import Article
-from zds.forum.models import Category, Forum, Topic
-from zds.tutorial.models import Tutorial
+from zds.forum.models import Category, Forum, Topic, Tag
+from zds.pages.views import home as home_view
+from zds.tutorialv2.models.database import PublishedContent
 
-from . import settings
+from django.conf import settings
 
 
 # SiteMap data
-class TutoSitemap(Sitemap):
+class ContentSitemap(Sitemap):
     changefreq = 'weekly'
     priority = 1
 
     def items(self):
-        return Tutorial.objects.filter(sha_public__isnull=False)
+        return (
+            PublishedContent.objects
+            .filter(must_redirect=False, content_type=self.content_type)
+            .prefetch_related('content')
+        )
 
-    def lastmod(self, tuto):
-        if tuto.update is None:
-            return tuto.pubdate
-        else:
-            return tuto.update
+    def lastmod(self, content):
+        return content.update_date or content.publication_date
 
-    def location(self, tuto):
-        return tuto.get_absolute_url_online()
+    def location(self, content):
+        return content.get_absolute_url_online()
 
 
-class ArticleSitemap(Sitemap):
+class TutoSitemap(ContentSitemap):
+    content_type = 'TUTORIAL'
+
+
+class ArticleSitemap(ContentSitemap):
+    content_type = 'ARTICLE'
+
+
+class OpinionSitemap(ContentSitemap):
+    content_type = 'OPINION'
+
+
+class PageSitemap(Sitemap):
     changefreq = 'weekly'
-    priority = 1
+    priority = 0.5
 
     def items(self):
-        return Article.objects.filter(sha_public__isnull=False)
+        urls = list(get_resolver(None).reverse_dict.keys())
+        return [url for url in urls if 'pages-' in str(url)]
 
-    def lastmod(self, article):
-        if article.update is None:
-            return article.pubdate
-        else:
-            return article.update
+    def location(self, item):
+        return reverse(item)
 
-    def location(self, article):
-        return article.get_absolute_url_online()
 
 sitemaps = {
     'tutos': TutoSitemap,
     'articles': ArticleSitemap,
+    'opinions': OpinionSitemap,
     'categories': GenericSitemap(
         {'queryset': Category.objects.all()},
         changefreq='yearly',
         priority=0.7
     ),
     'forums': GenericSitemap(
-        {'queryset': Forum.objects.filter(group__isnull=True)},
+        {'queryset': Forum.objects.filter(groups__isnull=True).exclude(pk=settings.ZDS_APP['forum']['beta_forum_id'])},
         changefreq='yearly',
         priority=0.7
     ),
     'topics': GenericSitemap(
-        {'queryset': Topic.objects.filter(is_locked=False, forum__group__isnull=True), 'date_field': 'pubdate'},
+        {'queryset': Topic.objects.filter(is_locked=False,
+                                          forum__groups__isnull=True)
+                                  .exclude(forum__pk=settings.ZDS_APP['forum']['beta_forum_id']),
+         'date_field': 'pubdate'},
         changefreq='hourly',
         priority=0.7
     ),
+    'tags': GenericSitemap(
+        {'queryset': Tag.objects.all()}
+    ),
+    'pages': PageSitemap,
 }
 
 
 admin.autodiscover()
 
 
-urlpatterns = patterns('',
-                       url(r'^tutoriels/', include('zds.tutorial.urls')),
-                       url(r'^articles/', include('zds.article.urls')),
-                       url(r'^forums/', include('zds.forum.urls')),
-                       url(r'^mp/', include('zds.mp.urls')),
-                       url(r'^membres/', include('zds.member.urls')),
-                       url(r'^admin/', include(admin.site.urls)),
-                       url(r'^pages/', include('zds.pages.urls')),
-                       url(r'^galerie/', include('zds.gallery.urls')),
-                       url(r'^rechercher/', include('zds.search.urls')),
-                       url(r'^munin/', include('zds.munin.urls')),
+urlpatterns = [
+    url(r'^', include('zds.tutorialv2.urls')),
+    url(r'^forums/', include('zds.forum.urls')),
+    url(r'^mp/', include('zds.mp.urls')),
+    url(r'^membres/', include('zds.member.urls')),
+    url(r'^admin/', include(admin.site.urls)),
+    url(r'^pages/', include('zds.pages.urls')),
+    url(r'^galerie/', include('zds.gallery.urls')),
+    url(r'^rechercher/', include('zds.searchv2.urls', namespace='search')),
+    url(r'^munin/', include('zds.munin.urls')),
+    url(r'^mise-en-avant/', include('zds.featured.urls')),
+    url(r'^notifications/', include('zds.notification.urls')),
+    url('', include('social.apps.django_app.urls', namespace='social')),
 
-                       url(r'^captcha/', include('captcha.urls')),
+    url(r'^munin/', include('munin.urls')),
 
-                       ('^munin/', include('munin.urls')),
+    url(r'^$', home_view, name='homepage'),
 
-                       url(r'^$', 'zds.pages.views.home'),
+    url(r'^api/', include('zds.api.urls', namespace='api')),
+    url(r'^oauth2/', include('oauth2_provider.urls', namespace='oauth2_provider')),
 
-                       ) + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 # SiteMap URLs
-urlpatterns += patterns('django.contrib.sitemaps.views',
-                        (r'^sitemap\.xml$',
-                         'index',
-                         {'sitemaps': sitemaps}),
-                        (r'^sitemap-(?P<section>.+)\.xml$',
-                            'sitemap',
-                            {'sitemaps': sitemaps}),
-                        )
+urlpatterns += [
+    url(r'^sitemap\.xml$', index_view, {'sitemaps': sitemaps}),
+    url(r'^sitemap-(?P<section>.+)\.xml$', sitemap_view, {'sitemaps': sitemaps},
+        name='django.contrib.sitemaps.views.sitemap'),
+]
 
 if settings.SERVE:
-    urlpatterns += patterns('',
-                            (r'^static/(?P<path>.*)$',
-                             'django.views.static.serve',
-                             {'document_root': settings.STATIC_ROOT}),
-                            (r'^media/(?P<path>.*)$',
-                                'django.views.static.serve',
-                                {'document_root': settings.MEDIA_ROOT}),
-                            )
+    from django.views.static import serve
+    urlpatterns += [
+        url(r'^static/(?P<path>.*)$', serve, {'document_root': settings.STATIC_ROOT}),
+        url(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
+    ]
+
+if settings.DEBUG:
+    import debug_toolbar
+    urlpatterns += [
+        url(r'^__debug__/', include(debug_toolbar.urls)),
+    ]
+
+# custom view for 500 errors
+handler500 = 'zds.pages.views.custom_error_500'

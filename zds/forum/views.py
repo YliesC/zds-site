@@ -1,1040 +1,792 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-from datetime import datetime
 import json
 
+import requests
 from django.conf import settings
-from django.db.models import Q
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, permission_required
 from django.contrib.auth.models import User
 from django.core.exceptions import PermissionDenied
-from django.core.mail import EmailMultiAlternatives
-from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.core.urlresolvers import reverse
 from django.db import transaction
-from django.http import Http404, HttpResponse
-from django.shortcuts import redirect, get_object_or_404
-from django.template import Context
-from django.template.loader import get_template
-from django.views.decorators.http import require_POST
+from django.http import Http404, HttpResponse, StreamingHttpResponse
+from django.shortcuts import redirect, get_object_or_404, render, render_to_response
+from django.template.loader import render_to_string
+from django.utils.decorators import method_decorator
+from django.utils.translation import ugettext_lazy as _
+from django.views.decorators.http import require_POST, require_GET
+from django.views.generic import ListView, DetailView, CreateView, UpdateView
+from django.views.generic.detail import SingleObjectMixin
 
-from haystack.inputs import AutoQuery
-from haystack.query import SearchQuerySet
-
-from forms import TopicForm, PostForm, MoveTopicForm
-from models import Category, Forum, Topic, Post, follow, follow_by_email, never_read, \
-    mark_read, TopicFollowed, get_topics
-from zds.forum.models import TopicRead
+from zds.forum.commons import TopicEditMixin, PostEditMixin, SinglePostObjectMixin, ForumEditMixin
+from zds.forum.forms import TopicForm, PostForm, MoveTopicForm
+from zds.forum.models import Category, Forum, Topic, Post, is_read, mark_read, TopicRead
 from zds.member.decorator import can_write_and_read_now
-from zds.member.views import get_client_ip
-from zds.utils import render_template, slugify
-from zds.utils.models import Alert, CommentLike, CommentDislike, Tag
-from zds.utils.mps import send_mp
-from zds.utils.paginator import paginator_range
-from zds.utils.templatetags.emarkdown import emarkdown
-from zds.utils.templatetags.topbar import top_categories
+from zds.member.models import user_readable_forums
+from zds.notification import signals
+from zds.notification.models import NewTopicSubscription, TopicAnswerSubscription
+from zds.utils import slugify
+from zds.utils.forums import create_topic, send_post, CreatePostView
+from zds.utils.mixins import FilterMixin
+from zds.utils.models import Alert, Tag, CommentVote
+from zds.utils.paginator import ZdSPagingListView
 
 
-def index(request):
-    """Display the category list with all their forums."""
+class CategoriesForumsListView(ListView):
 
-    categories = top_categories(request.user)
+    context_object_name = 'categories'
+    template_name = 'forum/index.html'
+    queryset = Category.objects.all()
 
-    return render_template("forum/index.html", {"categories": categories,
-                                                "user": request.user})
+    def get_context_data(self, **kwargs):
+        context = super(CategoriesForumsListView, self).get_context_data(**kwargs)
+        for category in context.get('categories'):
+            category.forums = category.get_forums(self.request.user, with_count=True)
+        return context
 
 
-def details(request, cat_slug, forum_slug):
-    """Display the given forum and all its topics."""
+class CategoryForumsDetailView(DetailView):
 
-    forum = get_object_or_404(Forum, slug=forum_slug)
-    if not forum.can_read(request.user):
-        raise PermissionDenied
-    if "filter" in request.GET:
-        filter = request.GET["filter"]
-        if filter == "solve":
-            sticky_topics = get_topics(forum_pk=forum.pk, is_sticky=True, is_solved=True)
-            topics = get_topics(forum_pk=forum.pk, is_sticky=False, is_solved=True)
+    context_object_name = 'category'
+    template_name = 'forum/category/index.html'
+    queryset = Category.objects.all()
+
+    def get_context_data(self, **kwargs):
+        context = super(CategoryForumsDetailView, self).get_context_data(**kwargs)
+        context['forums'] = context.get('category').get_forums(self.request.user)
+        return context
+
+
+class LastTopicsViewTests(ListView):
+
+    context_object_name = 'topics'
+    template_name = 'forum/last_topics.html'
+
+    def get_queryset(self):
+        ordering = self.request.GET.get('order')
+        if ordering not in ('creation', 'last_post'):
+            ordering = 'creation'
+        query_order = {
+            'creation': '-pubdate',
+            'last_post': '-last_message__pubdate'
+        }.get(ordering)
+        topics = Topic.objects.select_related('forum') \
+            .filter(forum__in=user_readable_forums(self.request.user)) \
+            .order_by(query_order)[:settings.ZDS_APP['forum']['topics_per_page']]
+        return topics
+
+
+class ForumTopicsListView(FilterMixin, ForumEditMixin, ZdSPagingListView, UpdateView, SingleObjectMixin):
+
+    context_object_name = 'topics'
+    paginate_by = settings.ZDS_APP['forum']['topics_per_page']
+    template_name = 'forum/category/forum.html'
+    fields = '__all__'
+    filter_url_kwarg = 'filter'
+    default_filter_param = 'all'
+    object = None
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if not self.object.can_read(request.user):
+            raise PermissionDenied
+        return super(ZdSPagingListView, self).get(request, *args, **kwargs)
+
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    @method_decorator(transaction.atomic)
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        response = {}
+        if 'follow' in request.POST:
+            response['follow'] = self.perform_follow(self.object, request.user)
+            response['subscriberCount'] = NewTopicSubscription.objects.get_subscriptions(self.object).count()
+        elif 'email' in request.POST:
+            response['email'] = self.perform_follow_by_email(self.object, request.user)
+
+        self.object.save()
+        if request.is_ajax():
+            return HttpResponse(json.dumps(response), content_type='application/json')
+        return redirect('{}?page={}'.format(self.object.get_absolute_url(), self.page))
+
+    def get_context_data(self, **kwargs):
+        context = super(ForumTopicsListView, self).get_context_data(**kwargs)
+        context['topics'] = list(context['topics'].all())
+        sticky = list(
+            self.filter_queryset(
+                Topic.objects.get_all_topics_of_a_forum(self.object.pk, is_sticky=True),
+                context['filter']))
+        # we need to load it in memory because later we will get the
+        # "already read topic" set out of this list and MySQL does not support that type of subquery
+
+        # Add a topic.is_followed attribute
+        followed_queryset = TopicAnswerSubscription.objects.get_objects_followed_by(self.request.user.id)
+        followed_topics = list(set(followed_queryset) & set(context['topics'] + sticky))
+        for topic in set(context['topics'] + sticky):
+            topic.is_followed = topic in followed_topics
+
+        context.update({
+            'forum': self.object,
+            'sticky_topics': sticky,
+            'topic_read': TopicRead.objects.list_read_topic_pk(self.request.user, context['topics'] + sticky),
+            'subscriber_count': NewTopicSubscription.objects.get_subscriptions(self.object).count(),
+        })
+        return context
+
+    def get_object(self, queryset=None):
+        forum = Forum.objects\
+                     .select_related('category')\
+                     .filter(slug=self.kwargs.get('forum_slug'))\
+                     .first()
+        if forum is None:
+            raise Http404('Forum with slug {} was not found'.format(self.kwargs.get('forum_slug')))
+        return forum
+
+    def get_queryset(self):
+        self.queryset = Topic.objects.get_all_topics_of_a_forum(self.object.pk)
+        return super(ForumTopicsListView, self).get_queryset()
+
+    def filter_queryset(self, queryset, filter_param):
+        if filter_param == 'solve':
+            queryset = queryset.filter(solved_by__isnull=False)
+        elif filter_param == 'unsolve':
+            queryset = queryset.filter(solved_by__isnull=True)
+        elif filter_param == 'noanswer':
+            queryset = queryset.filter(last_message__position=1)
+        return queryset
+
+
+class TopicPostsListView(ZdSPagingListView, SingleObjectMixin):
+
+    context_object_name = 'posts'
+    paginate_by = settings.ZDS_APP['forum']['posts_per_page']
+    template_name = 'forum/topic/index.html'
+    object = None
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if not self.object.forum.can_read(request.user):
+            raise PermissionDenied
+        if not self.kwargs.get('topic_slug') == slugify(self.object.title):
+            return redirect(self.object.get_absolute_url())
+        return super(TopicPostsListView, self).get(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        context = super(TopicPostsListView, self).get_context_data(**kwargs)
+        form = PostForm(self.object, self.request.user)
+        form.helper.form_action = reverse('post-new') + '?sujet=' + str(self.object.pk)
+
+        posts = self.build_list_with_previous_item(context['object_list'])
+        context.update({
+            'topic': self.object,
+            'posts': posts,
+            'last_post_pk': self.object.last_message.pk,
+            'form': form,
+            'form_move': MoveTopicForm(topic=self.object),
+        })
+
+        votes = CommentVote.objects.filter(user_id=self.request.user.pk, comment__in=context['posts']).all()
+        context['user_like'] = [vote.comment_id for vote in votes if vote.positive]
+        context['user_dislike'] = [vote.comment_id for vote in votes if not vote.positive]
+        context['is_staff'] = self.request.user.has_perm('forum.change_topic')
+        context['is_antispam'] = self.object.antispam()
+        context['subscriber_count'] = TopicAnswerSubscription.objects.get_subscriptions(self.object).count()
+        if hasattr(self.request.user, 'profile'):
+            context['is_dev'] = self.request.user.profile.is_dev()
+            context['tags'] = settings.ZDS_APP['site']['repository']['tags']
+            context['has_token'] = self.request.user.profile.github_token != ''
+
+        if self.request.user.has_perm('forum.change_topic'):
+            context['user_can_modify'] = [post.pk for post in context['posts']]
         else:
-            sticky_topics = get_topics(forum_pk=forum.pk, is_sticky=True, is_solved=False)
-            topics = get_topics(forum_pk=forum.pk, is_sticky=False, is_solved=False)
-    else:
-        filter = None
-        sticky_topics = get_topics(forum_pk=forum.pk, is_sticky=True)
-        topics = get_topics(forum_pk=forum.pk, is_sticky=False)
+            context['user_can_modify'] = [post.pk for post in context['posts'] if post.author == self.request.user]
 
-    # Paginator
+        if self.request.user.is_authenticated():
+            for post in posts:
+                signals.content_read.send(sender=post.__class__, instance=post, user=self.request.user)
+            if not is_read(self.object):
+                mark_read(self.object)
+        return context
 
-    paginator = Paginator(topics, settings.TOPICS_PER_PAGE)
-    page = request.GET.get("page")
-    try:
-        shown_topics = paginator.page(page)
-        page = int(page)
-    except PageNotAnInteger:
-        shown_topics = paginator.page(1)
-        page = 1
-    except EmptyPage:
-        shown_topics = paginator.page(paginator.num_pages)
-        page = paginator.num_pages
+    def get_object(self, queryset=None):
+        return get_object_or_404(Topic, pk=self.kwargs.get('topic_pk'))
 
-    return render_template("forum/category/forum.html", {
-        "forum": forum,
-        "sticky_topics": sticky_topics,
-        "topics": shown_topics,
-        "pages": paginator_range(page, paginator.num_pages),
-        "nb": page,
-        "filter": filter,
-    })
+    def get_queryset(self):
+        return Post.objects.get_messages_of_a_topic(self.object.pk)
 
 
-def cat_details(request, cat_slug):
-    """Display the forums belonging to the given category."""
+class TopicNew(CreateView, SingleObjectMixin):
 
-    category = get_object_or_404(Category, slug=cat_slug)
+    template_name = 'forum/topic/new.html'
+    form_class = TopicForm
+    object = None
 
-    forums_pub = Forum.objects\
-        .filter(group__isnull=True, category__pk=category.pk)\
-        .select_related("category").all()
-    if request.user.is_authenticated():
-        forums_prv = Forum.objects\
-            .filter(group__isnull=False,
-                    group__in=request.user.groups.all(),
-                    category__pk=category.pk)\
-            .select_related("category")\
-            .all()
-        forums = forums_pub | forums_prv
-    else:
-        forums = forums_pub
-
-    return render_template("forum/category/index.html", {"category": category,
-                                                         "forums": forums})
-
-
-def topic(request, topic_pk, topic_slug):
-    """Display a thread and its posts using a pager."""
-
-    topic = get_object_or_404(Topic, pk=topic_pk)
-    if not topic.forum.can_read(request.user):
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        with transaction.atomic():
+            self.object = self.get_object()
+            if self.object.can_read(request.user):
+                return super(TopicNew, self).dispatch(request, *args, **kwargs)
         raise PermissionDenied
 
-    # Check link
+    def get_object(self, queryset=None):
+        try:
+            forum_pk = int(self.request.GET.get('forum'))
+        except (KeyError, ValueError, TypeError):
+            raise Http404
+        return get_object_or_404(Forum, pk=forum_pk)
 
-    if not topic_slug == slugify(topic.title):
+    def get(self, request, *args, **kwargs):
+        return render(request, self.template_name, {'forum': self.object, 'form': self.form_class()})
+
+    def post(self, request, *args, **kwargs):
+        form = self.get_form(self.form_class)
+
+        if 'preview' in request.POST:
+            if request.is_ajax():
+                content = render_to_response('misc/preview.part.html', {'text': request.POST['text']})
+                return StreamingHttpResponse(content)
+            else:
+                initial = {
+                    'title': request.POST['title'],
+                    'subtitle': request.POST['subtitle'],
+                    'text': request.POST['text']
+                }
+                form = self.form_class(initial=initial)
+        elif form.is_valid():
+            return self.form_valid(form)
+        return render(request, self.template_name, {'forum': self.object, 'form': form})
+
+    def get_form(self, form_class=TopicForm):
+        return form_class(self.request.POST)
+
+    def form_valid(self, form):
+        topic = create_topic(
+            self.request,
+            self.request.user,
+            self.object,
+            form.data['title'],
+            form.data['subtitle'],
+            form.data['text'],
+            tags=form.data['tags']
+        )
         return redirect(topic.get_absolute_url())
 
-    # If the user is authenticated and has never read topic, we mark it as
-    # read.
 
-    if request.user.is_authenticated():
-        if never_read(topic):
-            mark_read(topic)
+class TopicEdit(UpdateView, SingleObjectMixin, TopicEditMixin):
 
-    # Retrieves all posts of the topic and use paginator with them.
+    template_name = 'forum/topic/edit.html'
+    form_class = TopicForm
+    object = None
+    page = 1
 
-    posts = \
-        Post.objects.filter(topic__pk=topic.pk) \
-        .select_related() \
-        .order_by("position"
-                  ).all()
-    last_post_pk = topic.last_message.pk
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    @method_decorator(transaction.atomic)
+    def dispatch(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if not self.object.forum.can_read(request.user):
+            return redirect(reverse('cats-forums-list'))
+        if ('text' in request.POST or request.method == 'GET') \
+                and self.object.author != request.user and not request.user.has_perm('forum.change_topic'):
+            raise PermissionDenied
+        if ('text' in request.POST or request.method == 'GET') \
+                and not self.object.first_post().is_visible and not request.user.has_perm('forum.change_topic'):
+            raise PermissionDenied
+        if 'page' in request.POST:
+            try:
+                self.page = int(request.POST.get('page'))
+            except (KeyError, ValueError, TypeError):
+                self.page = 1
+        return super(TopicEdit, self).dispatch(request, *args, **kwargs)
 
-    # Handle pagination
+    def get(self, request, *args, **kwargs):
+        is_staff = request.user.has_perm('forum.change_topic')
+        if self.object.author != request.user and is_staff:
+            messages.warning(request, _(
+                'Vous éditez ce sujet en tant que modérateur (auteur : {}). Soyez encore plus '
+                'prudent lors de l\'édition de celui-ci !').format(self.object.author.username))
+        form = self.create_form(self.form_class, **{
+            'title': self.object.title,
+            'subtitle': self.object.subtitle,
+            'text': self.object.first_post().text,
+            'tags': ', '.join([tag['title'] for tag in self.object.tags.values('title')]) or ''
+        })
+        return render(request, self.template_name, {'topic': self.object, 'form': form, 'is_staff': is_staff})
 
-    paginator = Paginator(posts, settings.POSTS_PER_PAGE)
+    def post(self, request, *args, **kwargs):
+        if 'text' in request.POST:
+            form = self.get_form(self.form_class)
 
-    # The category list is needed to move threads
+            if 'preview' in request.POST:
+                if request.is_ajax():
+                    content = render_to_response('misc/preview.part.html', {'text': request.POST['text']})
+                    return StreamingHttpResponse(content)
+                else:
+                    form = self.create_form(self.form_class, **{
+                        'title': request.POST.get('title'),
+                        'subtitle': request.POST.get('subtitle'),
+                        'text': request.POST.get('text'),
+                        'tags': request.POST.get('tags')
+                    })
+            elif form.is_valid():
+                return self.form_valid(form)
+            return render(request, self.template_name, {'topic': self.object, 'form': form})
 
-    categories = Category.objects.all()
-    if "page" in request.GET:
+        response = {}
+        if 'follow' in request.POST:
+            response['follow'] = self.perform_follow(self.object, request.user).is_active
+            response['subscriberCount'] = TopicAnswerSubscription.objects.get_subscriptions(self.object).count()
+        elif 'email' in request.POST:
+            response['email'] = self.perform_follow_by_email(self.object, request.user).is_active
+        elif 'solved' in request.POST:
+            response['solved'] = self.perform_solve_or_unsolve(self.request.user, self.object)
+        elif 'lock' in request.POST:
+            self.perform_lock(request, self.object)
+        elif 'sticky' in request.POST:
+            self.perform_sticky(request, self.object)
+        elif 'move' in request.POST:
+            self.perform_move()
+
+        self.object.save()
+        if request.is_ajax():
+            return HttpResponse(json.dumps(response), content_type='application/json')
+        return redirect('{}?page={}'.format(self.object.get_absolute_url(), self.page))
+
+    def get_object(self, queryset=None):
         try:
-            page_nbr = int(request.GET["page"])
-        except:
-            # problem in variable format
+            if 'topic' in self.request.GET:
+                topic_pk = int(self.request.GET['topic'])
+            elif 'topic' in self.request.POST:
+                topic_pk = int(self.request.POST['topic'])
+            else:
+                raise Http404('Impossible de trouver votre sujet.')
+        except (KeyError, ValueError, TypeError):
             raise Http404
-    else:
-        page_nbr = 1
-    try:
-        posts = paginator.page(page_nbr)
-    except PageNotAnInteger:
-        posts = paginator.page(1)
-    except EmptyPage:
-        raise Http404
-    res = []
-    if page_nbr != 1:
+        return get_object_or_404(Topic, pk=topic_pk)
 
-        # Show the last post of the previous page
+    def create_form(self, form_class, **kwargs):
+        form = form_class(initial=kwargs)
+        form.helper.form_action = reverse('topic-edit') + '?topic={}'.format(self.object.pk)
+        return form
 
-        last_page = paginator.page(page_nbr - 1).object_list
-        last_post = last_page[len(last_page) - 1]
-        res.append(last_post)
-    for post in posts:
-        res.append(post)
+    def get_form(self, form_class=TopicForm):
+        form = form_class(self.request.POST)
+        form.helper.form_action = reverse('topic-edit') + '?topic={}'.format(self.object.pk)
+        return form
 
-    # Build form to send a post for the current topic.
-
-    form = PostForm(topic, request.user)
-    form.helper.form_action = reverse("zds.forum.views.answer") + "?sujet=" \
-        + str(topic.pk)
-    form_move = MoveTopicForm(topic=topic)
-
-    return render_template("forum/topic/index.html", {
-        "topic": topic,
-        "posts": res,
-        "categories": categories,
-        "pages": paginator_range(page_nbr, paginator.num_pages),
-        "nb": page_nbr,
-        "last_post_pk": last_post_pk,
-        "form": form,
-        "form_move": form_move,
-    })
+    def form_valid(self, form):
+        topic = self.perform_edit_info(self.request, self.object, self.request.POST, self.request.user)
+        return redirect(topic.get_absolute_url())
 
 
-def get_tag_by_title(title):
-    nb_bracket = 0
-    current_tag = u""
-    current_title = u""
-    tags = []
-    continue_parsing_tags = True
-    original_title = title
-    for char in title:
+class FindTopic(ZdSPagingListView, SingleObjectMixin):
 
-        if char == u"[" and nb_bracket == 0 and continue_parsing_tags:
-            nb_bracket += 1
-        elif nb_bracket > 0 and char != u"]" and continue_parsing_tags:
-            current_tag = current_tag + char
-            if char == u"[":
-                nb_bracket += 1
-        elif char == u"]" and nb_bracket > 0 and continue_parsing_tags:
-            nb_bracket -= 1
-            if nb_bracket == 0 and current_tag.strip() != u"":
-                tags.append(current_tag.strip())
-                current_tag = u""
-            elif current_tag.strip() != u"" and nb_bracket > 0:
-                current_tag = current_tag + char
+    context_object_name = 'topics'
+    template_name = 'forum/find/topic.html'
+    paginate_by = settings.ZDS_APP['forum']['topics_per_page']
+    pk_url_kwarg = 'user_pk'
+    object = None
 
-        elif ((char != u"[" and char.strip() != "") or not continue_parsing_tags):
-            continue_parsing_tags = False
-            current_title = current_title + char
-    title = current_title
-    # if we did not succed in parsing the tags
-    if nb_bracket != 0:
-        return ([], original_title)
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        return super(FindTopic, self).get(request, *args, **kwargs)
 
-    return (tags, title.strip())
+    def get_context_data(self, **kwargs):
+        context = super(FindTopic, self).get_context_data(**kwargs)
+        context.update({
+            'usr': self.object,
+            'hidden_topics_count': Topic.objects.filter(author=self.object).count() - context['paginator'].count,
+        })
+        return context
+
+    def get_queryset(self):
+        return Topic.objects.get_all_topics_of_a_user(self.request.user, self.object)
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(User, pk=self.kwargs.get(self.pk_url_kwarg))
 
 
-@can_write_and_read_now
-@login_required
-@transaction.atomic
-def new(request):
-    """Creates a new topic in a forum."""
+class FindTopicByTag(FilterMixin, ForumEditMixin, ZdSPagingListView, SingleObjectMixin):
 
-    try:
-        forum_pk = request.GET["forum"]
-    except:
-        # problem in variable format
-        raise Http404
-    forum = get_object_or_404(Forum, pk=forum_pk)
-    if not forum.can_read(request.user):
+    context_object_name = 'topics'
+    paginate_by = settings.ZDS_APP['forum']['topics_per_page']
+    template_name = 'forum/find/topic_by_tag.html'
+    filter_url_kwarg = 'filter'
+    default_filter_param = 'all'
+    object = None
+
+    def get(self, request, *args, **kwargs):
+        if self.kwargs.get('tag_pk'):
+            return redirect('topic-tag-find', tag_slug=self.kwargs.get('tag_slug'), permanent=True)
+        self.object = self.get_object()
+        return super(FindTopicByTag, self).get(request, *args, **kwargs)
+
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    @method_decorator(transaction.atomic)
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        response = {}
+        if 'follow' in request.POST:
+            response['follow'] = self.perform_follow(self.object, request.user)
+            response['subscriberCount'] = NewTopicSubscription.objects.get_subscriptions(self.object).count(),
+        elif 'email' in request.POST:
+            response['email'] = self.perform_follow_by_email(self.object, request.user)
+
+        self.object.save()
+        if request.is_ajax():
+            return HttpResponse(json.dumps(response), content_type='application/json')
+        return redirect('{}?page={}'.format(self.object.get_absolute_url(), self.page))
+
+    def get_context_data(self, *args, **kwargs):
+        context = super(FindTopicByTag, self).get_context_data(*args, **kwargs)
+        context['topics'] = list(context['topics'].all())
+        # we need to load it in memory because later we will get the
+        # "already read topic" set out of this list and MySQL does not support that type of subquery
+        context.update({
+            'tag': self.object,
+            'subscriber_count': NewTopicSubscription.objects.get_subscriptions(self.object).count(),
+            'topic_read': TopicRead.objects.list_read_topic_pk(self.request.user, context['topics'])
+        })
+        return context
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(Tag, slug=self.kwargs.get('tag_slug'))
+
+    def get_queryset(self):
+        self.queryset = Topic.objects.get_all_topics_of_a_tag(self.object, self.request.user)
+        return super(FindTopicByTag, self).get_queryset()
+
+    def filter_queryset(self, queryset, filter_param):
+        if filter_param == 'solve':
+            queryset = queryset.filter(solved_by__isnull=False)
+        elif filter_param == 'unsolve':
+            queryset = queryset.filter(solved_by__isnull=True)
+        elif filter_param == 'noanswer':
+            queryset = queryset.filter(last_message__position=1)
+        return queryset
+
+
+class PostNew(CreatePostView):
+
+    model_quote = Post
+    template_name = 'forum/post/new.html'
+    form_class = PostForm
+    object = None
+    posts = None
+
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        with transaction.atomic():
+            self.object = self.get_object()
+            can_read = self.object.forum.can_read(request.user)
+            not_locked = not self.object.is_locked
+            not_spamming = not self.object.antispam(request.user)
+            if can_read and not_locked and not_spamming:
+                self.posts = Post.objects.filter(topic=self.object) \
+                                 .prefetch_related() \
+                                 .order_by('-position')[:settings.ZDS_APP['forum']['posts_per_page']]
+                return super(PostNew, self).dispatch(request, *args, **kwargs)
         raise PermissionDenied
-    if request.method == "POST":
 
-        # If the client is using the "preview" button
+    def create_forum(self, form_class, **kwargs):
+        form = form_class(self.object, self.request.user, initial=kwargs)
+        form.helper.form_action = reverse('post-new') + '?sujet=' + str(self.object.pk)
+        return form
 
-        if "preview" in request.POST:
-            form = TopicForm(initial={"title": request.POST["title"],
-                                      "subtitle": request.POST["subtitle"],
-                                      "text": request.POST["text"]})
-            return render_template("forum/topic/new.html",
-                                   {"forum": forum,
-                                    "form": form,
-                                    "text": request.POST["text"]})
-        form = TopicForm(request.POST)
-        data = form.data
-        if form.is_valid():
+    def get_form(self, form_class=PostForm):
+        form = self.form_class(self.object, self.request.user, self.request.POST)
+        form.helper.form_action = reverse('post-new') + '?sujet=' + str(self.object.pk)
+        return form
 
-            # Treat title
+    def form_valid(self, form):
+        topic = send_post(self.request, self.object, self.request.user, form.data.get('text'))
+        return redirect(topic.last_message.get_absolute_url())
 
-            (tags, title) = get_tag_by_title(data["title"])
+    def get_object(self, queryset=None):
+        try:
+            topic_pk = int(self.request.GET.get('sujet'))
+        except (KeyError, ValueError, TypeError):
+            raise Http404
+        return get_object_or_404(Topic, pk=topic_pk)
 
-            # Creating the thread
-            n_topic = Topic()
-            n_topic.forum = forum
-            n_topic.title = title
-            n_topic.subtitle = data["subtitle"]
-            n_topic.pubdate = datetime.now()
-            n_topic.author = request.user
-            n_topic.save()
-            # add tags
 
-            n_topic.add_tags(tags)
-            n_topic.save()
-            # Adding the first message
+class PostEdit(UpdateView, SinglePostObjectMixin, PostEditMixin):
 
-            post = Post()
-            post.topic = n_topic
-            post.author = request.user
-            post.update_content(request.POST["text"])
-            post.pubdate = datetime.now()
-            post.position = 1
-            post.ip_address = get_client_ip(request)
-            post.save()
-            n_topic.last_message = post
-            n_topic.save()
+    template_name = 'forum/post/edit.html'
+    form_class = PostForm
 
-            # Follow the topic
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        with transaction.atomic():
+            self.object = self.get_object()
+            is_author = self.object.author == request.user
+            can_read = self.object.topic.forum.can_read(request.user)
+            is_visible = self.object.is_visible
+            if can_read and ((is_author and is_visible) or request.user.has_perm('forum.change_post')):
+                return super(PostEdit, self).dispatch(request, *args, **kwargs)
+        raise PermissionDenied
 
-            follow(n_topic)
-            return redirect(n_topic.get_absolute_url())
-    else:
-        form = TopicForm()
+    def get(self, request, *args, **kwargs):
+        if self.object.author != request.user and request.user.has_perm('forum.change_post'):
+            messages.warning(request, _(
+                'Vous éditez ce message en tant que modérateur (auteur : {}). Soyez encore plus '
+                'prudent lors de l\'édition de celui-ci !').format(self.object.author.username))
 
-    return render_template("forum/topic/new.html", {"forum": forum, "form": form})
+        form = self.create_form(self.form_class, **{
+            'text': self.object.text
+        })
+        return render(request, self.template_name, {
+            'post': self.object,
+            'topic': self.object.topic,
+            'text': self.object.text,
+            'form': form,
+        })
+
+    def post(self, request, *args, **kwargs):
+        if 'text' in request.POST:
+            form = self.get_form(self.form_class)
+
+            if 'preview' in request.POST:
+                if request.is_ajax():
+                    content = render_to_response('misc/preview.part.html', {'text': request.POST.get('text')})
+                    return StreamingHttpResponse(content)
+                else:
+                    form = self.create_form(self.form_class, **{
+                        'text': request.POST.get('text')
+                    })
+            elif form.is_valid():
+                return self.form_valid(form)
+            return render(request, self.template_name, {
+                'post': self.object,
+                'topic': self.object.topic,
+                'text': request.POST.get('text'),
+                'form': form,
+            })
+
+        if 'delete_message' in request.POST:
+            self.perform_hide_message(request, self.object, self.request.user, self.request.POST)
+        if 'show_message' in request.POST:
+            self.perform_show_message(self.request, self.object)
+        if 'signal_message' in request.POST:
+            raise PermissionDenied('Not the good URL anymore!')
+
+        self.object.save()
+        return redirect(self.object.get_absolute_url())
+
+    def create_form(self, form_class, **kwargs):
+        form = form_class(self.object.topic, self.request.user, initial=kwargs)
+        form.helper.form_action = reverse('post-edit') + '?message=' + str(self.object.pk)
+        return form
+
+    def get_form(self, form_class=PostForm):
+        form = self.form_class(self.object.topic, self.request.user, self.request.POST)
+        form.helper.form_action = reverse('post-edit') + '?message=' + str(self.object.pk)
+        return form
+
+    def form_valid(self, form):
+        post = self.perform_edit_post(self.request, self.object, self.request.user, self.request.POST.get('text'))
+        return redirect(post.get_absolute_url())
+
+
+class PostSignal(UpdateView, SinglePostObjectMixin, PostEditMixin):
+
+    http_method_names = ['post']
+
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        with transaction.atomic():
+            self.object = self.get_object()
+            can_read = self.object.topic.forum.can_read(request.user)
+            is_visible = self.object.is_visible
+            can_edit = request.user.has_perm('forum.change_post')
+            if can_read and (is_visible or can_edit):
+                return super(PostSignal, self).dispatch(request, *args, **kwargs)
+        raise PermissionDenied
+
+    def post(self, request, *args, **kwargs):
+        if 'signal_message' in request.POST:
+            self.perform_alert_message(request, self.object, request.user, request.POST.get('signal_text'))
+        else:
+            raise Http404('no signal_message in POST')
+
+        self.object.save()
+        return redirect(self.object.get_absolute_url())
+
+
+class PostUseful(UpdateView, SinglePostObjectMixin, PostEditMixin):
+
+    @method_decorator(require_POST)
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if not self.object.topic.forum.can_read(request.user):
+            raise PermissionDenied
+        if self.object.topic.author != request.user:
+            if not request.user.has_perm('forum.change_post'):
+                raise PermissionDenied
+        return super(PostUseful, self).dispatch(request, *args, **kwargs)
+
+    def post(self, request, *args, **kwargs):
+        self.perform_useful(self.object)
+
+        if request.is_ajax():
+            return HttpResponse(json.dumps(self.object.is_useful), content_type='application/json')
+
+        return redirect(self.object.get_absolute_url())
+
+
+class PostUnread(UpdateView, SinglePostObjectMixin, PostEditMixin):
+
+    @method_decorator(require_GET)
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if not self.object.topic.forum.can_read(request.user):
+            raise PermissionDenied
+        return super(PostUnread, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        self.perform_unread_message(self.object, self.request.user)
+
+        return redirect(reverse('forum-topics-list', args=[
+            self.object.topic.forum.category.slug, self.object.topic.forum.slug]))
+
+
+class FindPost(ZdSPagingListView, SingleObjectMixin):
+
+    context_object_name = 'posts'
+    template_name = 'forum/find/post.html'
+    paginate_by = settings.ZDS_APP['forum']['posts_per_page']
+    pk_url_kwarg = 'user_pk'
+    object = None
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        return super(FindPost, self).get(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        context = super(FindPost, self).get_context_data(**kwargs)
+
+        context.update({
+            'usr': self.object,
+            'hidden_posts_count':
+                Post.objects.filter(author=self.object).distinct().count() - context['paginator'].count,
+        })
+
+        return context
+
+    def get_queryset(self):
+        return Post.objects.get_all_messages_of_a_user(self.request.user, self.object)
+
+    def get_object(self, queryset=None):
+        return get_object_or_404(User, pk=self.kwargs.get(self.pk_url_kwarg))
 
 
 @can_write_and_read_now
 @login_required
+@permission_required('forum.change_post', raise_exception=True)
 @require_POST
 @transaction.atomic
 def solve_alert(request):
+    """
+    Solves an alert (i.e. delete it from alert list) and sends an email to the user that created the alert, if the
+    resolver leaves a comment.
+    This can only be done by staff.
+    """
 
-    # only staff can move topic
-
-    if not request.user.has_perm("forum.change_post"):
-        raise PermissionDenied
-
-    alert = get_object_or_404(Alert, pk=request.POST["alert_pk"])
+    alert = get_object_or_404(Alert, pk=request.POST['alert_pk'])
     post = Post.objects.get(pk=alert.comment.id)
 
-    if request.POST["text"] != "":
-        bot = get_object_or_404(User, username=settings.BOT_ACCOUNT)
-        msg = \
-            (u'Bonjour {0},'
-             u'Vous recevez ce message car vous avez signalé le message de *{1}*, '
-             u'dans le sujet [{2}]({3}). Votre alerte a été traitée par **{4}** '
-             u'et il vous a laissé le message suivant :'
-             u'\n\n> {5}\n\nToute l\'équipe de la modération vous remercie !'.format(
-                 alert.author.username,
-                 post.author.username,
-                 post.topic.title,
-                 settings.SITE_URL + post.get_absolute_url(),
-                 request.user.username,
-                 request.POST["text"],))
-        send_mp(
-            bot,
-            [alert.author],
-            u"Résolution d'alerte : {0}".format(post.topic.title),
-            "",
-            msg,
-            False,
-        )
+    resolve_reason = ''
+    msg_title = ''
+    msg_content = ''
+    if 'text' in request.POST and request.POST['text']:
+        resolve_reason = request.POST['text']
+        msg_title = _("Résolution d'alerte : {0}").format(post.topic.title)
+        msg_content = render_to_string('forum/messages/solve_alert_pm.md', {
+            'alert_author': alert.author.username,
+            'post_author': post.author.username,
+            'post_title': post.topic.title,
+            'post_url': settings.ZDS_APP['site']['url'] + post.get_absolute_url(),
+            'staff_name': request.user.username,
+            'staff_message': resolve_reason,
+        })
 
-    alert.delete()
-    messages.success(request, u"L'alerte a bien été résolue")
+    alert.solve(request.user, resolve_reason, msg_title, msg_content)
+    messages.success(request, _("L'alerte a bien été résolue."))
     return redirect(post.get_absolute_url())
 
 
-@can_write_and_read_now
-@login_required
-@require_POST
-@transaction.atomic
-def move_topic(request):
+class ManageGitHubIssue(UpdateView):
+    queryset = Topic.objects.all()
 
-    # only staff can move topic
-
-    if not request.user.has_perm("forum.change_topic"):
-        raise PermissionDenied
-    try:
-        topic_pk = request.GET["sujet"]
-    except:
-        # problem in variable format
-        raise Http404
-    forum = get_object_or_404(Forum, pk=request.POST["forum"])
-    if not forum.can_read(request.user):
-        raise PermissionDenied
-    topic = get_object_or_404(Topic, pk=topic_pk)
-    topic.forum = forum
-    topic.save()
-
-    # unfollow user auth
-
-    followers = TopicFollowed.objects.filter(topic=topic)
-    for follower in followers:
-        if not forum.can_read(follower.user):
-            follower.delete()
-    messages.success(request,
-                     u"Le sujet {0} a bien été déplacé dans {1}."
-                     .format(topic.title,
-                             forum.title))
-    return redirect(topic.get_absolute_url())
-
-
-@can_write_and_read_now
-@login_required
-@require_POST
-def edit(request):
-    """Edit the given topic."""
-
-    try:
-        topic_pk = request.POST["topic"]
-    except:
-        # problem in variable format
-        raise Http404
-    if "page" in request.POST:
-        try:
-            page = int(request.POST["page"])
-        except:
-            # problem in variable format
-            raise Http404
-    else:
-        page = 1
-
-    data = request.POST
-    resp = {}
-    g_topic = get_object_or_404(Topic, pk=topic_pk)
-    if "follow" in data:
-        resp["follow"] = follow(g_topic)
-    if "email" in data:
-        resp["email"] = follow_by_email(g_topic)
-    if request.user == g_topic.author \
-            or request.user.has_perm("forum.change_topic"):
-        if "solved" in data:
-            g_topic.is_solved = not g_topic.is_solved
-            resp["solved"] = g_topic.is_solved
-    if request.user.has_perm("forum.change_topic"):
-
-        # Staff actions using AJAX TODO: Do not redirect on AJAX requests
-
-        if "lock" in data:
-            g_topic.is_locked = data["lock"] == "true"
-            messages.success(request,
-                             u"Le sujet {0} est désormais vérouillé."
-                             .format(g_topic.title))
-        if "sticky" in data:
-            g_topic.is_sticky = data["sticky"] == "true"
-            messages.success(request,
-                             u"Le sujet {0} est désormais épinglé."
-                             .format(g_topic.title))
-        if "move" in data:
-            try:
-                forum_pk = int(request.POST["move_target"])
-            except:
-                # problem in variable format
-                raise Http404
-            forum = get_object_or_404(Forum, pk=forum_pk)
-            g_topic.forum = forum
-    g_topic.save()
-    if request.is_ajax():
-        return HttpResponse(json.dumps(resp))
-    else:
-        if not g_topic.forum.can_read(request.user):
-            return redirect(reverse("zds.forum.views.index"))
-        else:
-            return redirect(u"{}?page={}".format(g_topic.get_absolute_url(),
-                                                 page))
-
-
-@can_write_and_read_now
-@login_required
-@transaction.atomic
-def answer(request):
-    """Adds an answer from a user to a topic."""
-
-    try:
-        topic_pk = request.GET["sujet"]
-    except:
-        # problem in variable format
-        raise Http404
-
-    # Retrieve current topic.
-
-    g_topic = get_object_or_404(Topic, pk=topic_pk)
-    if not g_topic.forum.can_read(request.user):
-        raise PermissionDenied
-
-    # Making sure posting is allowed
-
-    if g_topic.is_locked:
-        raise PermissionDenied
-
-    # Check that the user isn't spamming
-
-    if g_topic.antispam(request.user):
-        raise PermissionDenied
-    last_post_pk = g_topic.last_message.pk
-
-    # Retrieve last posts of the current topic.
-    posts = Post.objects.filter(topic=g_topic) \
-        .prefetch_related() \
-        .order_by("-pubdate")[:settings.POSTS_PER_PAGE]
-
-    # User would like preview his post or post a new post on the topic.
-
-    if request.method == "POST":
-        data = request.POST
-        newpost = last_post_pk != int(data["last_post"])
-
-        # Using the « preview button », the « more » button or new post
-
-        if "preview" in data or newpost:
-            form = PostForm(g_topic, request.user, initial={"text": data["text"]})
-            form.helper.form_action = reverse("zds.forum.views.answer") \
-                + "?sujet=" + str(g_topic.pk)
-            return render_template("forum/post/new.html", {
-                "text": data["text"],
-                "topic": g_topic,
-                "posts": posts,
-                "last_post_pk": last_post_pk,
-                "newpost": newpost,
-                "form": form,
-            })
-        else:
-
-            # Saving the message
-
-            form = PostForm(g_topic, request.user, request.POST)
-            if form.is_valid():
-                data = form.data
-                post = Post()
-                post.topic = g_topic
-                post.author = request.user
-                post.text = data["text"]
-                post.text_html = emarkdown(data["text"])
-                post.pubdate = datetime.now()
-                post.position = g_topic.get_post_count() + 1
-                post.ip_address = get_client_ip(request)
-                post.save()
-                g_topic.last_message = post
-                g_topic.save()
-                # Send mail
-                subject = "ZDS - Notification : " + g_topic.title
-                from_email = "Zeste de Savoir <{0}>".format(settings.MAIL_NOREPLY)
-                followers = g_topic.get_followers_by_email()
-                for follower in followers:
-                    receiver = follower.user
-                    if receiver == request.user:
-                        continue
-                    pos = post.position - 1
-                    last_read = TopicRead.objects.filter(
-                        topic=g_topic,
-                        post__position=pos,
-                        user=receiver).count()
-                    if last_read > 0:
-                        message_html = get_template('email/notification/new.html') \
-                            .render(
-                                Context({
-                                    'username': receiver.username,
-                                    'title': g_topic.title,
-                                    'url': settings.SITE_URL + post.get_absolute_url(),
-                                    'author': request.user.username
-                                }))
-                        message_txt = get_template('email/notification/new.txt').render(
-                            Context({
-                                'username': receiver.username,
-                                'title': g_topic.title,
-                                'url': settings.SITE_URL + post.get_absolute_url(),
-                                'author': request.user.username
-                            }))
-                        msg = EmailMultiAlternatives(
-                            subject, message_txt, from_email, [
-                                receiver.email])
-                        msg.attach_alternative(message_html, "text/html")
-                        msg.send()
-
-                # Follow topic on answering
-                if not g_topic.is_followed(user=request.user):
-                    follow(g_topic)
-                return redirect(post.get_absolute_url())
-            else:
-                return render_template("forum/post/new.html", {
-                    "text": data["text"],
-                    "topic": g_topic,
-                    "posts": posts,
-                    "last_post_pk": last_post_pk,
-                    "newpost": newpost,
-                    "form": form,
-                })
-    else:
-
-        # Actions from the editor render to new.html.
-
-        text = ""
-
-        # Using the quote button
-
-        if "cite" in request.GET:
-            post_cite_pk = request.GET["cite"]
-            post_cite = Post.objects.get(pk=post_cite_pk)
-            if not post_cite.is_visible:
-                raise PermissionDenied
-            for line in post_cite.text.splitlines():
-                text = text + "> " + line + "\n"
-            text = u"{0}Source:[{1}]({2}{3})".format(
-                text,
-                post_cite.author.username,
-                settings.SITE_URL,
-                post_cite.get_absolute_url())
-
-        form = PostForm(g_topic, request.user, initial={"text": text})
-        form.helper.form_action = reverse("zds.forum.views.answer") \
-            + "?sujet=" + str(g_topic.pk)
-        return render_template("forum/post/new.html", {
-            "topic": g_topic,
-            "posts": posts,
-            "last_post_pk": last_post_pk,
-            "form": form,
-        })
-
-
-@can_write_and_read_now
-@login_required
-@transaction.atomic
-def edit_post(request):
-    """Edit the given user's post."""
-
-    try:
-        post_pk = request.GET["message"]
-    except:
-        # problem in variable format
-        raise Http404
-    post = get_object_or_404(Post, pk=post_pk)
-    if not post.topic.forum.can_read(request.user):
-        raise PermissionDenied
-    g_topic = None
-    if post.position <= 1:
-        g_topic = get_object_or_404(Topic, pk=post.topic.pk)
-
-    # Making sure the user is allowed to do that. Author of the post must to be
-    # the user logged.
-
-    if post.author != request.user \
-            and not request.user.has_perm("forum.change_post") and "signal_message" \
-            not in request.POST:
-        raise PermissionDenied
-    if post.author != request.user and request.method == "GET" \
-            and request.user.has_perm("forum.change_post"):
-        messages.warning(request,
-                         u'Vous \xe9ditez ce message en tant que '
-                         u'mod\xe9rateur (auteur : {}). Soyez encore plus '
-                         u'prudent lors de l\'\xe9dition de celui-ci !'
-                         .format(post.author.username))
-    if request.method == "POST":
-        if "delete_message" in request.POST:
-            if post.author == request.user \
-                    or request.user.has_perm("forum.change_post"):
-                post.alerts.all().delete()
-                post.is_visible = False
-                if request.user.has_perm("forum.change_post"):
-                    post.text_hidden = request.POST["text_hidden"]
-                post.editor = request.user
-                messages.success(request, u"Le message est désormais masqué")
-        if "show_message" in request.POST:
-            if request.user.has_perm("forum.change_post"):
-                post.is_visible = True
-                post.text_hidden = ""
-        if "signal_message" in request.POST:
-            alert = Alert()
-            alert.author = request.user
-            alert.comment = post
-            alert.scope = Alert.FORUM
-            alert.text = request.POST['signal_text']
-            alert.pubdate = datetime.now()
-            alert.save()
-            messages.success(request,
-                             u'Une alerte a été envoyée '
-                             u'à l\'équipe concernant '
-                             u'ce message')
-
-        # Using the preview button
-
-        if "preview" in request.POST:
-            if g_topic:
-                form = TopicForm(initial={"title": request.POST["title"],
-                                          "subtitle": request.POST["subtitle"],
-                                          "text": request.POST["text"]})
-            else:
-                form = PostForm(post.topic, request.user,
-                                initial={"text": request.POST["text"]})
-            form.helper.form_action = reverse("zds.forum.views.edit_post") \
-                + "?message=" + str(post_pk)
-            return render_template("forum/post/edit.html", {
-                "post": post,
-                "topic": post.topic,
-                "text": request.POST["text"],
-                "form": form,
-            })
-
-        if "delete_message" not in request.POST and "signal_message" \
-                not in request.POST and "show_message" not in request.POST:
-            # The user just sent data, handle them
-
-            if request.POST["text"].strip() != "":
-                post.text = request.POST["text"]
-                post.text_html = emarkdown(request.POST["text"])
-                post.update = datetime.now()
-                post.editor = request.user
-
-            # Modifying the thread info
-
-            if g_topic:
-                (tags, title) = get_tag_by_title(request.POST["title"])
-                g_topic.title = title
-                g_topic.subtitle = request.POST["subtitle"]
-                g_topic.save()
-                g_topic.tags.clear()
-
-                # add tags
-
-                g_topic.add_tags(tags)
-        post.save()
-        return redirect(post.get_absolute_url())
-    else:
-        if g_topic:
-            prefix = u""
-            for tag in g_topic.tags.all():
-                prefix += u"[{0}]".format(tag.title)
-            form = TopicForm(
-                initial={
-                    "title": u"{0} {1}".format(
-                        prefix,
-                        g_topic.title).strip(),
-                    "subtitle": g_topic.subtitle,
-                    "text": post.text})
-        else:
-            form = PostForm(post.topic, request.user,
-                            initial={"text": post.text})
-        form.helper.form_action = reverse("zds.forum.views.edit_post") \
-            + "?message=" + str(post_pk)
-        return render_template("forum/post/edit.html", {
-            "post": post,
-            "topic": post.topic,
-            "text": post.text,
-            "form": form,
-        })
-
-
-@can_write_and_read_now
-@login_required
-@require_POST
-def useful_post(request):
-    """Marks a message as useful (for the OP)"""
-
-    try:
-        post_pk = request.GET["message"]
-    except:
-        # problem in variable format
-        raise Http404
-    post = get_object_or_404(Post, pk=post_pk)
-
-    # check that author can access the forum
-
-    if not post.topic.forum.can_read(request.user):
-        raise PermissionDenied
-
-    # Making sure the user is allowed to do that
-
-    if post.author == request.user or request.user != post.topic.author:
-        if not request.user.has_perm("forum.change_post"):
+    @method_decorator(require_POST)
+    @method_decorator(login_required)
+    @method_decorator(can_write_and_read_now)
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.profile.is_dev():
             raise PermissionDenied
-    post.is_useful = not post.is_useful
-    post.save()
-    return redirect(post.get_absolute_url())
+        return super(ManageGitHubIssue, self).dispatch(request, *args, **kwargs)
 
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
 
-@can_write_and_read_now
-@login_required
-def unread_post(request):
-    """Marks a message as unread """
+        if 'unlink' in request.POST:
+            self.object.github_issue = None
+            self.object.save()
 
-    try:
-        post_pk = request.GET["message"]
-    except:
-        # problem in variable format
-        raise Http404
-    post = get_object_or_404(Post, pk=post_pk)
+            messages.success(request, _('Le sujet a été dissocié de son ticket.'))
+        elif 'link' in request.POST:
+            try:
+                self.object.github_issue = int(request.POST['issue'])
+                if self.object.github_issue < 1:
+                    raise ValueError
+                self.object.save()
 
-    # check that author can access the forum
+                messages.success(request, _('Le ticket a bien été associé.'))
+            except (KeyError, ValueError, OverflowError):
+                messages.error(request, _('Une erreur est survenue avec le numéro fourni.'))
+        else:  # create
+            if not request.POST.get('title') or not request.POST.get('body'):
+                messages.error(request, _('Le titre et le contenu sont obligatoires.'))
 
-    if not post.topic.forum.can_read(request.user):
-        raise PermissionDenied
+            elif not request.user.profile.github_token:
+                messages.error(request, _("Aucun token d'identification GitHub n'a été renseigné."))
 
-    t = TopicRead.objects.filter(topic=post.topic, user=request.user).first()
-    if t is None:
-        if post.position > 1:
-            unread = Post.objects.filter(topic=post.topic, position=(post.position - 1)).first()
-            t = TopicRead(post=unread, topic=unread.topic, user=request.user)
-            t.save()
-    else:
-        if post.position > 1:
-            unread = Post.objects.filter(topic=post.topic, position=(post.position - 1)).first()
-            t.post = unread
-            t.save()
-        else:
-            t.delete()
+            else:
+                tags = [value.strip() for key, value in list(request.POST.items()) if key.startswith('tag-')]
+                body = _('{}\n\nSujet : {}\n*Envoyé depuis {}*')\
+                    .format(request.POST['body'],
+                            settings.ZDS_APP['site']['url'] + self.object.get_absolute_url(),
+                            settings.ZDS_APP['site']['literal_name'])
+                try:
+                    response = requests.post(
+                        settings.ZDS_APP['site']['repository']['api'] + '/issues',
+                        timeout=10,
+                        headers={
+                            'Authorization': 'Token {}'.format(self.request.user.profile.github_token)},
+                        json={
+                            'title': request.POST['title'],
+                            'body': body,
+                            'labels': tags
+                        }
+                    )
+                    if response.status_code != 201:
+                        raise Exception
 
-    return redirect(reverse("zds.forum.views.details", args=[post.topic.forum.category.slug, post.topic.forum.slug]))
+                    json_response = response.json()
+                    self.object.github_issue = json_response['number']
+                    self.object.save()
 
+                    messages.success(request, _('Le ticket a bien été créé.'))
+                except Exception:
+                    messages.error(request, _("Un problème est survenu lors de l'envoi sur GitHub."))
 
-@can_write_and_read_now
-@login_required
-@require_POST
-def like_post(request):
-    """Like a post."""
-
-    try:
-        post_pk = request.GET["message"]
-    except:
-        # problem in variable format
-        raise Http404
-    resp = {}
-    post = get_object_or_404(Post, pk=post_pk)
-    user = request.user
-    if not post.topic.forum.can_read(request.user):
-        raise PermissionDenied
-    if post.author.pk != request.user.pk:
-
-        # Making sure the user is allowed to do that
-
-        if CommentLike.objects.filter(user__pk=user.pk,
-                                      comments__pk=post_pk).count() == 0:
-            like = CommentLike()
-            like.user = user
-            like.comments = post
-            post.like = post.like + 1
-            post.save()
-            like.save()
-            if CommentDislike.objects.filter(user__pk=user.pk,
-                                             comments__pk=post_pk).count() > 0:
-                CommentDislike.objects.filter(
-                    user__pk=user.pk,
-                    comments__pk=post_pk).all().delete()
-                post.dislike = post.dislike - 1
-                post.save()
-        else:
-            CommentLike.objects.filter(user__pk=user.pk,
-                                       comments__pk=post_pk).all().delete()
-            post.like = post.like - 1
-            post.save()
-    resp["upvotes"] = post.like
-    resp["downvotes"] = post.dislike
-    if request.is_ajax():
-        return HttpResponse(json.dumps(resp), content_type='application/json')
-    else:
-        return redirect(post.get_absolute_url())
-
-
-@can_write_and_read_now
-@login_required
-@require_POST
-def dislike_post(request):
-    """Dislike a post."""
-
-    try:
-        post_pk = request.GET["message"]
-    except:
-        # problem in variable format
-        raise Http404
-    resp = {}
-    post = get_object_or_404(Post, pk=post_pk)
-    user = request.user
-    if not post.topic.forum.can_read(request.user):
-        raise PermissionDenied
-    if post.author.pk != request.user.pk:
-
-        # Making sure the user is allowed to do that
-
-        if CommentDislike.objects.filter(user__pk=user.pk,
-                                         comments__pk=post_pk).count() == 0:
-            dislike = CommentDislike()
-            dislike.user = user
-            dislike.comments = post
-            post.dislike = post.dislike + 1
-            post.save()
-            dislike.save()
-            if CommentLike.objects.filter(user__pk=user.pk,
-                                          comments__pk=post_pk).count() > 0:
-                CommentLike.objects.filter(user__pk=user.pk,
-                                           comments__pk=post_pk).all().delete()
-                post.like = post.like - 1
-                post.save()
-        else:
-            CommentDislike.objects.filter(user__pk=user.pk,
-                                          comments__pk=post_pk).all().delete()
-            post.dislike = post.dislike - 1
-            post.save()
-    resp["upvotes"] = post.like
-    resp["downvotes"] = post.dislike
-    if request.is_ajax():
-        return HttpResponse(json.dumps(resp))
-    else:
-        return redirect(post.get_absolute_url())
-
-
-def find_topic_by_tag(request, tag_pk, tag_slug):
-    """Finds all topics byg tag."""
-
-    tag = Tag.objects.filter(pk=tag_pk, slug=tag_slug).first()
-    if tag is None:
-        return redirect(reverse("zds.forum.views.index"))
-    u = request.user
-    if "filter" in request.GET:
-        filter = request.GET["filter"]
-        if request.GET["filter"] == "solve":
-            topics = Topic.objects.filter(
-                tags__in=[tag],
-                is_solved=True).order_by("-last_message__pubdate").prefetch_related(
-                    "author",
-                    "last_message",
-                    "tags")\
-                .exclude(Q(forum__group__isnull=False) & ~Q(forum__group__in=u.groups.all()))\
-                .all()
-        else:
-            topics = Topic.objects.filter(
-                tags__in=[tag],
-                is_solved=False).order_by("-last_message__pubdate")\
-                .prefetch_related(
-                    "author",
-                    "last_message",
-                    "tags")\
-                .exclude(Q(forum__group__isnull=False) & ~Q(forum__group__in=u.groups.all()))\
-                .all()
-    else:
-        filter = None
-        topics = Topic.objects.filter(tags__in=[tag]).order_by("-last_message__pubdate")\
-            .exclude(Q(forum__group__isnull=False) & ~Q(forum__group__in=u.groups.all()))\
-            .prefetch_related("author", "last_message", "tags").all()
-    # Paginator
-
-    paginator = Paginator(topics, settings.TOPICS_PER_PAGE)
-    page = request.GET.get("page")
-    try:
-        shown_topics = paginator.page(page)
-        page = int(page)
-    except PageNotAnInteger:
-        shown_topics = paginator.page(1)
-        page = 1
-    except EmptyPage:
-        shown_topics = paginator.page(paginator.num_pages)
-        page = paginator.num_pages
-    return render_template("forum/find/topic_by_tag.html", {
-        "topics": shown_topics,
-        "tag": tag,
-        "pages": paginator_range(page, paginator.num_pages),
-        "nb": page,
-        "filter": filter,
-    })
-
-
-def find_topic(request, user_pk):
-    """Finds all topics of a user."""
-
-    displayed_user = get_object_or_404(User, pk=user_pk)
-    topics = \
-        Topic.objects\
-        .filter(author=displayed_user)\
-        .exclude(Q(forum__group__isnull=False) & ~Q(forum__group__in=request.user.groups.all()))\
-        .prefetch_related("author")\
-        .order_by("-pubdate").all()
-
-    # Paginator
-    paginator = Paginator(topics, settings.TOPICS_PER_PAGE)
-    page = request.GET.get("page")
-    try:
-        shown_topics = paginator.page(page)
-        page = int(page)
-    except PageNotAnInteger:
-        shown_topics = paginator.page(1)
-        page = 1
-    except EmptyPage:
-        shown_topics = paginator.page(paginator.num_pages)
-        page = paginator.num_pages
-
-    return render_template("forum/find/topic.html", {
-        "topics": shown_topics,
-        "usr": displayed_user,
-        "pages": paginator_range(page, paginator.num_pages),
-        "nb": page,
-    })
-
-
-def find_post(request, user_pk):
-    """Finds all posts of a user."""
-
-    displayed_user = get_object_or_404(User, pk=user_pk)
-    user = request.user
-
-    if user.has_perm("forum.change_post"):
-        posts = \
-            Post.objects.filter(author=displayed_user)\
-            .exclude(Q(topic__forum__group__isnull=False) & ~Q(topic__forum__group__in=user.groups.all()))\
-            .prefetch_related("author")\
-            .order_by("-pubdate").all()
-    else:
-        posts = \
-            Post.objects.filter(author=displayed_user)\
-            .filter(is_visible=True)\
-            .exclude(Q(topic__forum__group__isnull=False) & ~Q(topic__forum__group__in=user.groups.all()))\
-            .prefetch_related("author").order_by("-pubdate").all()
-
-    # Paginator
-    paginator = Paginator(posts, settings.POSTS_PER_PAGE)
-    page = request.GET.get("page")
-    try:
-        shown_posts = paginator.page(page)
-        page = int(page)
-    except PageNotAnInteger:
-        shown_posts = paginator.page(1)
-        page = 1
-    except EmptyPage:
-        shown_posts = paginator.page(paginator.num_pages)
-        page = paginator.num_pages
-
-    return render_template("forum/find/post.html", {
-        "posts": shown_posts,
-        "usr": displayed_user,
-        "pages": paginator_range(page, paginator.num_pages),
-        "nb": page,
-    })
-
-
-@login_required
-def followed_topics(request):
-    followed_topics = request.user.get_profile().get_followed_topics()
-
-    # Paginator
-
-    paginator = Paginator(followed_topics, settings.FOLLOWED_TOPICS_PER_PAGE)
-    page = request.GET.get("page")
-    try:
-        shown_topics = paginator.page(page)
-        page = int(page)
-    except PageNotAnInteger:
-        shown_topics = paginator.page(1)
-        page = 1
-    except EmptyPage:
-        shown_topics = paginator.page(paginator.num_pages)
-        page = paginator.num_pages
-    return render_template("forum/topic/followed.html",
-                           {"followed_topics": shown_topics,
-                            "pages": paginator_range(page,
-                                                     paginator.num_pages),
-                            "nb": page})
-
-
-def complete_topic(request):
-    sqs = SearchQuerySet().filter(content=AutoQuery(request.GET.get('q'))).order_by('-pubdate').all()
-
-    suggestions = {}
-
-    cpt = 0
-    for result in sqs:
-        if cpt > 5:
-            break
-        if 'Topic' in str(result.model) and result.object.is_solved:
-            suggestions[str(result.object.pk)] = (result.title, result.author, result.object.get_absolute_url())
-            cpt += 1
-
-    the_data = json.dumps(suggestions)
-
-    return HttpResponse(the_data, content_type='application/json')
+        return redirect(self.object.get_absolute_url())

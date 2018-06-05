@@ -1,0 +1,90 @@
+{% load date %}
+{% load i18n %}
+{% load category_url %}
+{% load set %}
+{% load displayable_authors %}
+{% load minute_to_duration %}
+{% load captureas %}
+
+{% captureas taglist %}
+    {% if content.is_opinion %}
+        {% url 'opinion:list' %}
+    {% else %}
+        {% url 'publication:list' %}
+    {% endif %}
+{% endcaptureas %}
+
+{% if publishablecontent.tags.all|length > 0 %}
+    <ul class="taglist" itemprop="keywords">
+        {% for tag in publishablecontent.tags.all %}
+            <li><a href="{{ taglist }}?tag={% if content.is_opinion %}{{ tag.title|urlencode }}{% else %}{{ tag.slug }}{% endif %}">{{ tag.title }}</a></li>
+        {% endfor %}
+    </ul>
+{% endif %}
+
+{% if online %}
+    {% set public_object.get_last_action_date as update_date %}
+{% else %}
+    {% set  content.update_date as update_date %}
+{% endif %}
+
+{% if update_date %}
+    <span class="pubdate">
+    {% if online and update_date == public_object.publication_date %}
+        {% trans "Publié" %} :
+        <time datetime="{{ update_date|date:"c" }}" pubdate="pubdate" itemprop="dateModified">
+            {{ update_date|format_date }}
+        </time>
+    {% else %}
+        {% trans "Dernière mise à jour" %} :
+        <time datetime="{{ update_date|date:"c" }}" pubdate="pubdate" itemprop="dateModified">
+            {{ update_date|format_date }}
+        </time>
+    {% endif %}
+    </span>
+{% endif %}
+
+{% include "misc/zen_button.part.html" %}
+
+<div class="authors">
+    <span class="authors-label">
+        {% trans "Auteur" %}{{ publishablecontent|displayable_authors:online|pluralize }} :
+    </span>
+    <ul>
+        {% for member in publishablecontent|displayable_authors:online %}
+            <li>
+                {% include "misc/member_item.part.html" with avatar=True author=True %}
+            </li>
+        {% endfor %}
+
+        {% if add_author == True %}
+            <li>
+                <a href="#add-author" class="open-modal ico-after more blue">
+                    {% trans "Ajouter un auteur" %}
+                </a>
+            </li>
+        {% endif %}
+    </ul>
+    <br/>
+    <span class="authors-label">
+        {% trans "Catégorie" %}{{ content.subcategory.all|pluralize }} :
+    </span>
+    <ul>
+        {% for category in content.subcategory.all %}
+            {% if forloop.first %}{% elif forloop.last %} {% trans "et" %}{% else %},{% endif %}
+            {% if content.is_opinion %}
+                <a href="{% url 'opinion:list' %}?category={{ category.slug }}">{{ category.title }}</a>
+            {% else %}
+                <a href="{% url 'publication:list' %}?subcategory={{ category.slug }}">{{ category.title }}</a>
+            {% endif %}
+        {% endfor %}
+    </ul>
+    <br/>
+    <span>
+        {% if online and reading_time and not is_part_or_chapter %}
+            {% trans "Temps de lecture estimé : " %}{{ reading_time|minute_to_duration }}
+        {% elif online and not is_part_or_chapter %}
+            {% trans "Temps de lecture estimé à moins d’une minute." %}
+        {% endif %}
+    </span>
+</div>

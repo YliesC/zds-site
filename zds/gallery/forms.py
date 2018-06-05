@@ -1,6 +1,5 @@
-# coding: utf-8
-
 from django.conf import settings
+from django.utils.translation import ugettext_lazy as _
 
 from crispy_forms.bootstrap import StrictButton
 from crispy_forms.helper import FormHelper
@@ -13,30 +12,25 @@ from django.core.urlresolvers import reverse
 from zds.gallery.models import Gallery, Image
 
 
-class GalleryForm(forms.Form):
-    title = forms.CharField(
-        label='Titre',
-        max_length=Gallery._meta.get_field('title').max_length,
-    )
+class GalleryForm(forms.ModelForm):
 
-    subtitle = forms.CharField(
-        label='Sous-titre',
-        max_length=Gallery._meta.get_field('subtitle').max_length,
-        required=False
-    )
+    class Meta:
+        model = Gallery
+
+        fields = ['title', 'subtitle']
 
     def __init__(self, *args, **kwargs):
         super(GalleryForm, self).__init__(*args, **kwargs)
         self.helper = FormHelper()
         self.helper.form_class = 'clearfix'
-        self.helper.form_action = reverse('zds.gallery.views.new_gallery')
+        self.helper.form_action = reverse('gallery-new')
         self.helper.form_method = 'post'
 
         self.helper.layout = Layout(
             Field('title'),
             Field('subtitle'),
             ButtonHolder(
-                StrictButton(u'Créer', type='submit'),
+                StrictButton(_('Créer'), type='submit'),
             ),
         )
 
@@ -45,13 +39,30 @@ class GalleryForm(forms.Form):
 
         title = cleaned_data.get('title')
 
-        if title and title.strip() == '':
+        if title and not title.strip():
             self._errors['title'] = self.error_class(
-                [u'Le champ titre ne peut être vide'])
+                [_('Le champ titre ne peut être vide')])
             if 'title' in cleaned_data:
                 del cleaned_data['title']
 
         return cleaned_data
+
+
+class UpdateGalleryForm(GalleryForm):
+
+    def __init__(self, *args, **kwargs):
+        super(UpdateGalleryForm, self).__init__(*args, **kwargs)
+        self.helper = FormHelper()
+        self.helper.form_class = 'clearfix'
+        self.helper.form_method = 'post'
+
+        self.helper.layout = Layout(
+            Field('title'),
+            Field('subtitle'),
+            ButtonHolder(
+                StrictButton(_('Mettre à jour'), type='submit'),
+            ),
+        )
 
 
 class UserGalleryForm(forms.Form):
@@ -61,7 +72,7 @@ class UserGalleryForm(forms.Form):
         required=True,
         widget=forms.TextInput(
             attrs={
-                'placeholder': 'Nom de l\'utilisateur',
+                'placeholder': _("Nom de l'utilisateur"),
                 'data-autocomplete': '{ "type": "single" }'
             }
         )
@@ -70,8 +81,8 @@ class UserGalleryForm(forms.Form):
     mode = forms.ChoiceField(
         label='',
         choices=(
-            ('R', "En mode lecture"),
-            ('W', "En mode écriture"),
+            ('R', 'En mode lecture'),
+            ('W', 'En mode écriture'),
         ),
         required=True,
         widget=forms.RadioSelect,
@@ -80,8 +91,9 @@ class UserGalleryForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super(UserGalleryForm, self).__init__(*args, **kwargs)
         self.helper = FormHelper()
-        self.helper.form_class = 'clearfix'
-        self.helper.form_action = reverse('zds.gallery.views.modify_gallery')
+        self.helper.form_class = 'modal modal-flex'
+        self.helper.form_id = 'add-user-modal'
+        self.helper.form_action = reverse('gallery-modify')
         self.helper.form_method = 'post'
 
         self.helper.layout = Layout(
@@ -89,7 +101,7 @@ class UserGalleryForm(forms.Form):
             Field('mode'),
             Hidden('gallery', '{{ gallery.pk }}'),
             Hidden('adduser', 'True'),
-            StrictButton('Ajouter', type='submit'),
+            StrictButton(_('Ajouter'), type='submit'),
         )
 
     def clean(self):
@@ -99,28 +111,22 @@ class UserGalleryForm(forms.Form):
 
         if User.objects.filter(username=user).count() == 0:
             self._errors['user'] = self.error_class(
-                [u'Ce nom d\'utilisateur n\'existe pas'])
+                [_("Ce nom d'utilisateur n'existe pas")])
 
         return cleaned_data
 
 
-class ImageForm(forms.Form):
-    title = forms.CharField(
-        label='Titre',
-        max_length=Image._meta.get_field('title').max_length,
-        required=True,
-    )
+class ImageForm(forms.ModelForm):
 
-    legend = forms.CharField(
-        label=u'Légende',
-        max_length=Image._meta.get_field('legend').max_length,
-        required=False,
-    )
+    class Meta:
+        model = Image
+
+        fields = ['title', 'legend']
 
     physical = forms.ImageField(
-        label=u'Sélectionnez votre image',
+        label=_('Sélectionnez votre image'),
         required=True,
-        help_text='Taille maximum : ' + str(settings.IMAGE_MAX_SIZE / 1024) + ' <abbr title="kibioctet">Kio</abbr>'
+        help_text=_('Taille maximum : {0} Ko').format(settings.ZDS_APP['gallery']['image_max_size'] / 1024)
     )
 
     def __init__(self, *args, **kwargs):
@@ -134,7 +140,7 @@ class ImageForm(forms.Form):
             Field('legend'),
             Field('physical'),
             ButtonHolder(
-                StrictButton('Ajouter', type='submit'),
+                StrictButton(_('Ajouter'), type='submit'),
             ),
         )
 
@@ -143,53 +149,17 @@ class ImageForm(forms.Form):
 
         physical = cleaned_data.get('physical')
 
-        if physical is not None and physical.size > settings.IMAGE_MAX_SIZE:
+        if physical is not None and physical.size > settings.ZDS_APP['gallery']['image_max_size']:
             self._errors['physical'] = self.error_class(
-                [u'Votre image est trop lourde, la limite autorisée '
-                 u'est de : {0} Ko' .format(settings.IMAGE_MAX_SIZE / 1024) + ' Ko'])
-        return cleaned_data
-
-
-class ArchiveImageForm(forms.Form):
-    file = forms.FileField(
-        label='Sélectionnez l\'archive contenant les images à charger',
-        required=True
-    )
-
-    def __init__(self, *args, **kwargs):
-        super(ArchiveImageForm, self).__init__(*args, **kwargs)
-        self.helper = FormHelper()
-        self.helper.form_class = 'clearfix'
-        self.helper.form_method = 'post'
-
-        self.helper.layout = Layout(
-            Field('file'),
-            ButtonHolder(
-                StrictButton('Importer', type='submit'),
-                HTML('<a class="btn btn-cancel" '
-                     u'href="{{ gallery.get_absolute_url }}">Annuler</a>'),
-            ),
-        )
-
-    def clean(self):
-        cleaned_data = super(ArchiveImageForm, self).clean()
-
-        file = cleaned_data.get('file')
-        extension = file.name.split('.')[-1]
-
-        if extension != "zip":
-            self._errors['file'] = self.error_class(
-                [u"Le champ n'accepte que les fichiers zip"])
-            if 'file' in cleaned_data:
-                del cleaned_data['file']
-
+                [_('Votre image est trop lourde, la limite autorisée '
+                 'est de {0} Ko').format(settings.ZDS_APP['gallery']['image_max_size'] / 1024)])
         return cleaned_data
 
 
 class UpdateImageForm(ImageForm):
 
     def __init__(self, *args, **kwargs):
-        super(ImageForm, self).__init__(*args, **kwargs)
+        super(UpdateImageForm, self).__init__(*args, **kwargs)
 
         self.fields['physical'].required = False
 
@@ -202,9 +172,48 @@ class UpdateImageForm(ImageForm):
             Field('legend'),
             Field('physical'),
             ButtonHolder(
-                StrictButton(u'Mettre à jour', type='submit'),
+                StrictButton(_('Mettre à jour'), type='submit'),
             ),
         )
+
+
+class ArchiveImageForm(forms.Form):
+    file = forms.FileField(
+        label=_("Sélectionnez l'archive contenant les images à charger"),
+        required=True
+    )
+
+    def __init__(self, *args, **kwargs):
+        super(ArchiveImageForm, self).__init__(*args, **kwargs)
+        self.helper = FormHelper()
+        self.helper.form_class = 'clearfix'
+        self.helper.form_method = 'post'
+
+        self.helper.layout = Layout(
+            Field('file'),
+            ButtonHolder(
+                StrictButton(_('Importer'), type='submit'),
+                HTML('<a class="btn btn-cancel" '
+                     'href="{{ gallery.get_absolute_url }}">Annuler</a>'),
+            ),
+        )
+
+    def clean(self):
+        cleaned_data = super(ArchiveImageForm, self).clean()
+
+        zip_file = cleaned_data.get('file', None)
+        if not zip_file:
+            self.add_error('file', _("Le fichier n'a pas été joint."))
+            return cleaned_data
+        extension = zip_file.name.split('.')[-1]
+
+        if extension != 'zip':
+            self._errors['file'] = self.error_class(
+                [_("Le champ n'accepte que les fichiers zip")])
+            if 'file' in cleaned_data:
+                del cleaned_data['file']
+
+        return cleaned_data
 
 
 class ImageAsAvatarForm(forms.Form):
@@ -215,12 +224,12 @@ class ImageAsAvatarForm(forms.Form):
         super(ImageAsAvatarForm, self).__init__(*args, **kwargs)
         self.helper = FormHelper()
         self.helper.form_class = 'clearfix'
-        self.helper.form_action = reverse('zds.member.views.update_avatar')
+        self.helper.form_action = reverse('update-avatar-member')
         self.helper.form_method = 'post'
 
         self.helper.layout = Layout(
             Hidden('avatar_url', '{{ image.physical.url }}'),
             ButtonHolder(
-                StrictButton("Utiliser comme avatar", type='submit'),
+                StrictButton(_('Utiliser comme avatar'), type='submit'),
             ),
         )

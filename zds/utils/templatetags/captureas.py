@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
-
 from django import template
+from django.utils.safestring import mark_safe
 
 register = template.Library()
 
@@ -32,7 +31,7 @@ def do_captureas(parser, token):
 
 class CaptureasNode(template.Node):
     """
-    Capture end render node content to a variable name.
+    Capture and render a nodelist to a new variable.
     """
 
     def __init__(self, nodelist, variable_name):
@@ -54,5 +53,5 @@ class CaptureasNode(template.Node):
         :rtype: str
         """
         output = self.__node_list.render(context)
-        context[self.__variable_name] = output.strip()
+        context[self.__variable_name] = mark_safe(output.strip())
         return ''

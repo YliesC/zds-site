@@ -3,25 +3,34 @@
 {% load captureas %}
 {% load date %}
 {% load profile %}
+{% load i18n %}
+{% load remove_url_scheme %}
+
+
+
+{% block head_extra %}
+    {{ block.super }}
+    {% include "mathjax.html" %}
+{% endblock %}
 
 
 
 {% block title_base %}
-    &bull; Forums
+    &bull; {% trans "Forum" %}
 {% endblock %}
 
 
 
 {% block mobile_title %}
-    Forums
+    {% trans "Forum" %}
 {% endblock %}
 
 
 
 {% block breadcrumb_base %}
     <li itemscope itemtype="http://data-vocabulary.org/Breadcrumb">
-        <a href="{% url "zds.forum.views.index" %}" itemprop="url">
-            <span itemprop="title">Forums</span>
+        <a href="{% url "cats-forums-list" %}" itemprop="url">
+            <span itemprop="title">{% trans "Forums" %}</span>
         </a>
     </li>
 {% endblock %}
@@ -36,6 +45,14 @@
 
 {% block sidebar %}
     <aside class="sidebar mobile-menu-hide">
+        {% captureas returnbtn %}
+            {% block return_btn %}{% endblock %}
+        {% endcaptureas %}
+
+        {% if returnbtn %}
+            {{ returnbtn|safe }}
+        {% endif %}
+
         {% if user.is_authenticated %}
             {% captureas newbtn %}
                 {% block new_btn %}{% endblock %}
@@ -50,7 +67,7 @@
             {% endcaptureas %}
             {% if sidebaractions %}
                 <div class="mobile-menu-bloc mobile-all-links mobile-show-ico" data-title="Actions">
-                    <h3>Actions</h3>
+                    <h3>{% trans "Actions" %}</h3>
                     <ul>
                         {{ sidebaractions|safe }}
                     </ul>
@@ -62,60 +79,61 @@
 
         {% if user.is_authenticated %}
             <div class="mobile-menu-bloc mobile-all-links" data-title="Sujets suivis">
-                <h3>Sujets suivis</h3>
+                <h3>{% trans "Sujets suivis" %}</h3>
 
-                {% with follwedtopics=user|followed_topics %}
-                    {% for period, topics in follwedtopics.items %}
+                {% with followedtopics=user|followed_topics %}
+                    {% for period, topics in followedtopics.items %}
                         <h4>{{ period|humane_delta }}</h4>
                         <ul>
                             {% for topic in topics %}
                                 <li>
-                                    <form action="{% url "zds.forum.views.edit" %}" method="post">
+                                    <form action="{% url 'topic-edit' %}" method="post">
                                         <input type="hidden" name="topic" value="{{ topic.pk }}">
-                                        <input type="hidden" name="nb" value="{{ nb }}">
-                                        <input type="hidden" name="page" value="{{ nb }}">
+                                        <input type="hidden" name="page" value="{% if page %} {{ page }} {% else %} 1 {% endif %}">
                                         <input type="hidden" name="follow" value="1">
                                         {% csrf_token %}
 
-                                        <button class="ico-after cross red stop-follow action-hover" 
+                                        <button class="ico-after cross red stop-follow action-hover"
                                                 data-title="Ne plus suivre">
-                                            Ne plus suivre
+                                            {% trans "Ne plus suivre" %}
                                         </button>
                                     </form>
-                                    
-                                    <a href="{% spaceless %}
-                                            {% with first_unread=topic.first_unread_post %}
-                                                {% if first_unread %}
-                                                    {{ first_unread.get_absolute_url }}
-                                                {% else %}
-                                                    {{ topic.last_read_post.get_absolute_url }}
-                                                {% endif %}
-                                            {% endwith %}
-                                            {% endspaceless %}"
-                                        class="{% if not topic|is_read %}unread{% endif %}
-                                            ico-after
 
-                                            {% if topic.is_solved %}
-                                                tick green
-                                            {% elif topic.is_locked %}
-                                                lock
-                                            {% else %}
-                                                star yellow
-                                            {% endif %}
-                                        "
-                                        {% if topic.is_solved or topic.is_locked %}
-                                            data-prefix="
-                                                {% if topic.is_solved %}
-                                                    Résolu
-                                                {% endif %}
-                                                {% if topic.is_locked %}
-                                                    Fermé
-                                                {% endif %}
-                                            "
-                                        {% endif %}
-                                    >
+                                    <a href="{% spaceless %}
+                                                 {% with first_unread=topic.first_unread_post %}
+                                                     {% if first_unread %}
+                                                         {{ first_unread.get_absolute_url }}
+                                                     {% else %}
+                                                         {{ topic.resolve_last_read_post_absolute_url }}
+                                                     {% endif %}
+                                                 {% endwith %}
+                                             {% endspaceless %}"
+
+                                       class="{% if not topic|is_read %}unread{% endif %}
+
+                                              ico-after
+
+                                              {% if topic.is_solved %}
+                                                  tick green
+                                              {% elif topic.is_locked %}
+                                                  lock
+                                              {% else %}
+                                                  star yellow
+                                              {% endif %}"
+
+                                       {% if topic.is_solved or topic.is_locked %}
+                                           data-prefix="{% spaceless %}
+                                                            {% if topic.is_solved %}
+                                                                Résolu
+                                                            {% endif %}
+                                                            {% if topic.is_locked %}
+                                                                Fermé
+                                                            {% endif %}
+                                                        {% endspaceless %}"
+                                       {% endif %}>
+
                                         {% if not topic|is_read %}
-                                            <span class="a11y">Non-lu :</span>
+                                            <span class="a11y">{% trans "Non-lu" %} :</span>
                                         {% endif %}
                                         {{ topic.title }}
                                     </a>
@@ -124,17 +142,17 @@
                                         {% with answer=topic.get_last_answer %}
                                             {% if answer %}
                                                 {% with profile=answer.author|profile %}
-                                                    <img src="{{ profile.get_avatar_url }}" alt="" class="avatar">
+                                                    <img src="{{ profile.get_avatar_url|remove_url_scheme }}" alt="" class="avatar">
                                                 {% endwith %}
                                                 <span class="topic-last-answer">
-                                                    Dernière réponse
+                                                    {% trans "Dernière réponse" %}
                                                     {{ answer.pubdate|format_date:True }}
-                                                    par
+                                                    {% trans "par" %}
                                                     <em>{{ answer.author.username }}</em>
                                                 </span>
                                             {% else %}
                                                 <span class="topic-no-last-answer">
-                                                    Aucune réponse
+                                                    {% trans "Aucune réponse" %}
                                                 </span>
                                             {% endif %}
                                         {% endwith %}
@@ -144,10 +162,10 @@
                         </ul>
                     {% endfor %}
 
-                    {% if follwedtopics.items|length <= 0 %}
+                    {% if followedtopics.items|length <= 0 %}
                         <ul>
                             <li class="inactive">
-                                <span class="disabled">Aucun sujet suivi</span>
+                                <span class="disabled">{% trans "Aucun sujet suivi" %}</span>
                             </li>
                         </ul>
                     {% endif %}

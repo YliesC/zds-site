@@ -1,0 +1,411 @@
+{% extends "tutorialv2/base_online.html" %}
+{% load emarkdown %}
+{% load profile %}
+{% load date %}
+{% load captureas %}
+{% load set %}
+{% load thumbnail %}
+{% load i18n %}
+{% load crispy_forms_tags %}
+{% load interventions %}
+{% load pluralize_fr %}
+{% load displayable_authors %}
+{% load joinby %}
+
+
+{% block title %}
+    {{ content.title }}
+{% endblock %}
+
+{% block DCMI_cards %}
+    <link rel="schema.DC" href="http://purl.org/dc/elements/1.1/" />
+    <meta name="DC.publisher" lang="fr" content="{{ app.site.literal_name }}" />
+    {% for author in publishablecontent|displayable_authors:True %}
+    <meta name="DC.creator" content="{{ author.username }}" />
+    {% endfor %}
+    <meta name="DC.type" content="text" />
+    <meta name="DC.title" content="{{ content.title }}" />
+    <meta name="DC.abstract" content="{{ content.title }}{% if content.description %} – {{ content.description }}{% endif %}" />
+    <meta name="DC.subject" lang="fr" content="{% joinby content.subcategory.all %}{% if content.tags.all %} – {% joinby content.tags.all separator=' ; ' final_separator=' ; ' %}{% endif %}" />
+    {% if content.description %}<meta name="DC.description" lang="fr" content="{{ content.description }}" />{% endif %}
+    <meta name="DC.date" content="{% if content.pubdate %}{{ content.pubdate|date:'Y/m/d' }}{% else %}{{ content.update_date|date:'Y/m/d' }}{% endif %}" />
+    <meta name="DC.format" content="text/html" />
+    {% if content.source %}<meta name="DC.source" content="{{ content.source }}" />{% endif %}
+    <meta name="DC.language" content="fr" />
+    <meta name="DC.rights" content="{{ content.licence }}" />
+{% endblock %}
+
+{% block description %}
+    {{ content.description }}
+{% endblock %}
+
+
+
+{% block meta_image %}{% spaceless %}
+    {% if content.image %}
+        {{ content.image.physical.tutorial_illu.url }}
+    {% else %}
+        {{ block.super }}
+    {% endif %}
+{% endspaceless %}{% endblock %}
+
+
+{% block head_extra %}
+    {{ block.super }}
+    {% if content.converted_to.get_absolute_url_online %}
+        <link rel="canonical" href="{{ content.converted_to.get_absolute_url_online }}" />
+    {% endif %}
+{% endblock %}
+
+
+{% block opengraph %}
+    {% include "tutorialv2/includes/opengraph.part.html" %}
+{% endblock %}
+
+
+
+{% block breadcrumb %}
+    <li>{{ content.title }}</li>
+{% endblock %}
+
+
+
+{% block headline %}
+    {% if content.licence %}
+        <span class="license" itemprop="license">
+            {{ content.licence }}
+        </span>
+    {% endif %}
+
+    <h1 {% if content.image %}class="illu"{% endif %} itemprop="name">
+        {% if content.image %}
+            <img src="{{ content.image.physical.tutorial_illu.url }}" alt="" itemprop="thumbnailUrl">
+        {% endif %}
+        {{ content.title }}
+    </h1>
+
+    {% if content.description %}
+        <h2 class="subtitle" itemprop="description">
+            {{ content.description }}
+        </h2>
+    {% endif %}
+
+    {% include 'tutorialv2/includes/tags_authors.part.html' with content=content online=True %}
+
+    {% if is_obsolete %}
+        <div class="content-wrapper">
+            <div class="alert-box warning">
+                {% blocktrans %}
+                    Ce contenu est obsolète. Il peut contenir des informations intéressantes mais soyez prudent avec celles-ci.
+                {% endblocktrans %}
+            </div>
+        </div>
+    {% endif %}
+{% endblock %}
+
+
+
+{% block content %}
+    <div class="opinion-alerts">
+        {% if is_staff %}
+            {% for alert in alerts %}
+                <div class="alert-box{% if not alert.solved %} error{% endif %}">
+                    {{ alert.pubdate|format_date|capfirst }} {% trans "par" %}
+                    {% include "misc/member_item.part.html" with member=alert.author %} :
+                    <em class="alert-box-text">{{ alert.text }}</em>
+                    {% if alert.solved %}
+                        <span class="close-alert-box close-alert-box-text">
+                            {% trans "Résolu par" %}
+                            {% include "misc/member_item.part.html" with member=alert.moderator %}
+                        </span>
+                    {% else %}
+                        <a href="#solve-content-{{ alert.pk }}" class="open-modal close-alert-box close-alert-box-text">{% trans "Résoudre" %}</a>
+                        <form id="solve-content-{{ alert.pk }}" method="post" action="{% url 'content:resolve-content' alert.pk %}" class="modal modal-flex">
+                            <textarea name="text" class="input" placeholder="{% trans "Message à envoyer au membre ayant lancé l’alerte" %}"></textarea>
+                            <input type="hidden" name="alert_pk" value="{{ alert.pk }}">
+
+                            {% csrf_token %}
+                            <button type="submit" name="delete-post" class="button expand alert tiny">{% trans "Résoudre l’alerte" %}</button>
+                        </form>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% endif %}
+    </div>
+
+    {% if content.is_opinion %}
+        {% if content.converted_to %}
+            {% if content.converted_to.get_absolute_url_online %}
+                <div class="alert-box info">
+                    {% blocktrans with url_article=content.converted_to.get_absolute_url_online %}
+                        Ce billet a été promu en <a href="{{ url_article }}">article</a>.
+                    {% endblocktrans %}
+                </div>
+            {% elif is_staff %}
+                <div class="alert-box info">
+                    {% blocktrans with url_article=content.converted_to.get_absolute_url %}
+                        Ce billet a fait l’objet d’une demande de publication <a href="{{ url_article }}">en tant qu’article</a>. Il est donc présent dans la zone de validation en attente de prise en charge par un validateur.
+                    {% endblocktrans %}
+                </div>
+            {% endif %}
+        {% endif %}
+    {% endif %}
+
+    {% captureas content_pager %}
+        {% include "tutorialv2/includes/content_pager.part.html" with content=content %}
+    {% endcaptureas %}
+
+    {{ content_pager }}
+
+    {% if content.has_extracts %}
+        {{ content.get_content_online|safe }}
+    {% else %}
+
+        {% if content.introduction %}
+            {{ content.get_introduction_online|default:""|safe }}
+        {% endif %}
+
+        {% if not content.has_sub_containers %}
+            <ol class="summary-part">
+        {% endif %}
+
+        {% for child in content.children %}
+            {%  include "tutorialv2/includes/child_online.part.html" with child=child %}
+        {% endfor %}
+
+        {% if not content.has_sub_containers %}
+            </ol>
+        {% endif %}
+
+        <hr class="clearfix" />
+        <hr />
+
+        {% if content.conclusion %}
+            {{ content.get_conclusion_online|default:""|safe }}
+        {% endif %}
+
+    {% endif %}
+
+    {{ content_pager }}
+    {% include "tutorialv2/includes/alert.html" with content=content current_content_type=current_content_type %}
+    {% include "tutorialv2/includes/warn_typo.part.html" with content=content %}
+
+{% endblock %}
+
+{% block sidebar_actions %}
+    {% if user.is_authenticated %}
+    <li>
+    {% with content_is_followed=object|is_content_followed %}
+        {% url 'content:follow-reactions' object.pk as link_follow %}
+        {% if content_is_followed %}
+            {% trans "Suivre ce contenu" as data_onclick %}
+            {% trans "Ne plus suivre ce contenu" as button_text %}
+        {% else %}
+            {% trans "Suivre ce contenu" as button_text %}
+            {% trans "Ne plus suivre ce contenu" as data_onclick %}
+        {% endif %}
+        {% include 'notification/follow_template.html' with link=link_follow is_followed=content_is_followed data_onclick=data_onclick button_text=button_text subscriber_count=subscriber_count %}
+    {% endwith %}
+    </li>
+    <li>
+    {% with content_is_followed=object|is_content_email_followed %}
+        {% url 'content:follow-reactions' object.pk as link_follow %}
+        {% if content_is_followed %}
+            {% trans "Être notifié par courriel" as data_onclick %}
+            {% trans "Ne plus être notifié par courriel" as button_text %}
+        {% else %}
+            {% trans "Être notifié par courriel" as button_text %}
+            {% trans "Ne plus être notifié par courriel" as data_onclick %}
+        {% endif %}
+        {% include 'notification/follow_by_email_template.html' with link=link_follow is_followed=content_is_followed data_onclick=data_onclick button_text=button_text %}
+    {% endwith %}
+    </li>
+    {% if not user in content.authors.all %}
+    <li>
+        <a href="{{ pm_link }}" class="ico-after cite blue">
+        {% blocktrans count counter=content.authors.all|length %}
+            Contacter l’auteur par MP
+        {% plural %}
+            Contacter les auteurs par MP
+        {% endblocktrans %}
+        </a>
+    </li>
+    {% endif %}
+    {% endif %}
+    {% if public_object.is_opinion %}
+        {% for author in public_object.authors.all %}
+            <li>
+                <a href="{% url 'content:find-opinion' author.pk %}" class="ico-after offline blue">
+                    {% blocktrans %}
+                        Voir la tribune de {{ author }}
+                    {% endblocktrans %}
+                </a>
+            </li>
+        {% endfor %}
+    {% endif %}
+{% endblock %}
+
+{% block sidebar_blocks %}
+    {% include "tutorialv2/includes/summary.part.html" with online=True %}
+
+    {% if is_staff or is_author %}
+        <div class="mobile-menu-bloc mobile-all-links mobile-show-ico" data-title="Administration">
+            <h3>{% blocktrans %}Admin<span class="wide">istration</span>{% endblocktrans %}</h3>
+            <ul>
+                <li>
+                    <a href="{{ object.get_absolute_url }}" class="ico-after offline blue">
+                        {% trans "Version brouillon" %}
+                    </a>
+                </li>
+                {% if is_staff %}
+                    {% if content.requires_validation %}
+                        <li>
+                            <a href="{% url "validation:history" content.pk content.slug %}" class="ico-after history blue">
+                                {% trans "Historique validation" %}
+                            </a>
+                        </li>
+                        <li>
+                            <form action="{% url 'validation:mark-obsolete' content.pk %}" method="post">
+                                {% csrf_token %}
+                                <button type="submit" class="ico-after alert blue">
+                                    {% if is_obsolete %}
+                                        {% trans "Marquer comme non obsolète" %}
+                                    {% else %}
+                                        {% trans "Marquer comme obsolète" %}
+                                    {% endif %}
+                                </button>
+                            </form>
+                        </li>
+                        <li>
+                            <a href="#unpublish" class="ico-after open-modal cross blue">
+                                {% trans "Dépublier" %}
+                            </a>
+                            {% crispy formRevokeValidation %}
+                        </li>
+                    {% else %}
+                        {% if is_staff %}
+                            {% if content.sha_public != content.sha_picked  %}
+                                <li>
+                                    <a href="#pick-opinion" class="ico-after open-modal tick green">
+                                        {% trans "Choisir le billet" %}
+                                    </a>
+                                    {% crispy formPickOpinion %}
+                                </li>
+                            {% endif %}
+                            {% if not content.converted_to %}
+                                <li>
+                                    <a href="#convert-opinion" class="ico-after open-modal tick green">
+                                        {% trans "Convertir en article" %}
+                                    </a>
+                                    {% crispy formConvertOpinion %}
+                                </li>
+                            {% endif %}
+                            {% if content.sha_public == content.sha_picked  %}
+                                <li>
+                                    <a href="#unpick-opinion" class="ico-after open-modal cross blue">
+                                        {% trans "Retirer des billets choisis" %}
+                                    </a>
+                                    {% crispy formUnpickOpinion %}
+                                </li>
+                            {% endif %}
+                        {% endif %}
+                        <li>
+                            <a href="#unpublish" class="ico-after open-modal cross blue">
+                                {% trans "Dépublier" %}
+                            </a>
+                            {% crispy formUnpublication %}
+                        </li>
+                    {% endif %}
+                    {% if perms.featured.change_featuredresource %}
+                        <li>
+                            <a href="{% url "featured-resource-create" %}?content_type=published_content&amp;content_id={{ content.pk }}"
+                               class="ico-after star blue">
+                                {% trans "Ajouter en une" %}
+                            </a>
+                        </li>
+                    {% endif %}
+                {% endif %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {% include "misc/social_buttons.part.html" with link=content.get_absolute_url_online text=content.title %}
+{% endblock %}
+
+{% block content_after %}
+    <h3 class="comments-title" id="comments">
+        {% if content.get_note_count > 0 %}
+            <span itemprop="commentCount">
+                {{ content.get_note_count }}
+            </span>
+            {% trans "commentaire" %}{{ content.get_note_count|pluralize_fr }}
+        {% else %}
+            {% trans "Aucun commentaire" %}
+        {% endif %}
+    </h3>
+
+
+    {% include "misc/paginator.html" with position="top" topic=content is_online=True anchor="comments" %}
+
+    {% set perms.tutorialv2.change_contentreaction as is_staff %}
+
+    {% for message in reactions %}
+
+        {% captureas edit_link %}
+            {% url "content:update-reaction" %}?message={{ message.pk }}&amp;pk={{ content.pk }}
+        {% endcaptureas %}
+
+        {% captureas cite_link %}
+            {% url "content:add-reaction" %}?cite={{ message.pk }}&amp;pk={{ content.pk }}
+        {% endcaptureas %}
+
+        {% captureas karma_link %}
+            {% url "api:content:reaction-karma" message.pk %}
+        {% endcaptureas %}
+
+        {% captureas alert_solve_link %}
+            {% url "content:resolve-reaction" %}
+        {% endcaptureas %}
+        {% captureas alert_link %}
+            {% url "content:alert-reaction" message.pk %}
+        {% endcaptureas %}
+        {% captureas hide_link %}
+            {% url "content:hide-reaction" message.pk%}
+        {% endcaptureas %}
+
+        {% captureas show_link %}
+            {% url "content:show-reaction" message.pk %}
+        {% endcaptureas %}
+
+        {% if forloop.first and page_obj.number > 1 %}
+            {% set True as is_repeated_message %}
+        {% else %}
+            {% set False as is_repeated_message %}
+        {% endif %}
+
+        {% if user == message.author or is_staff %}
+            {% set True as can_view_history %}
+        {% else %}
+            {% set False as can_view_history %}
+        {% endif %}
+
+        {% include "misc/message.part.html" with perms_change=is_staff topic=object %}
+    {% endfor %}
+
+
+    {% include "misc/paginator.html" with position="bottom" topic=content is_online=True anchor="comments" %}
+
+
+
+    {% captureas form_action %}
+        {% url 'content:add-reaction' %}?pk={{ content.pk }}
+    {% endcaptureas %}
+
+    {% if object.last_note %}
+        {% captureas last_note_pk %}
+            {{ object.last_note.pk }}
+        {% endcaptureas %}
+    {% endif %}
+
+    {% include "misc/message_form.html" with member=user topic=content is_antispam=is_antispam %}
+{% endblock %}
